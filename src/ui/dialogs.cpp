@@ -1,5 +1,6 @@
 #include "ui/dialogs.h"
 #include <commctrl.h>
+#include "core/cuda_libs.h"
 #include "core/download.h"
 #include "core/settings.h"
 #include "ui/modal.h"
@@ -7,12 +8,23 @@
 
 // =============================================================== model settings
 namespace {
+// start a fresh copy of the app a moment after this one has closed, then close this one (the main window is the dialog's owner)
+void restartApp(HWND dlg) {
+    wchar_t exe[MAX_PATH]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring cmd = std::wstring(L"cmd.exe /c ping -n 3 127.0.0.1 >nul & start \"\" \"") + exe + L"\"";
+    STARTUPINFOW si = {sizeof si}; PROCESS_INFORMATION pi = {};
+    if (CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) { CloseHandle(pi.hProcess); CloseHandle(pi.hThread); }
+    HWND owner = GetWindow(dlg, GW_OWNER);
+    PostMessageW(owner ? owner : dlg, WM_CLOSE, 0, 0);
+}
+
 struct RoleRow { const Role* role; HWND combo; std::vector<std::string> values; std::vector<ModelFile> extras; };
 
 struct SettingsDlg : Modal {
     Kind kind; bool changed = false;
     std::vector<RoleRow> rows;
-    HWND status = nullptr;
+    HWND status = nullptr, cudaStatus = nullptr, cudaBtn = nullptr;
+    bool cudaAsked = false;
 
     void fill(RoleRow& r, const std::string& current) {
         SendMessageW(r.combo, CB_RESETCONTENT, 0, 0);
@@ -36,6 +48,22 @@ struct SettingsDlg : Modal {
         }
         SendMessageW(r.combo, CB_SETCURSEL, sel, 0);
     }
+    void refreshCuda() {
+        CudaInstaller& ci = CudaInstaller::get();
+        bool inst = cudaLibsInstalled();
+        EnableWindow(cudaBtn, !inst && !ci.running());
+        uiSetText(cudaBtn, inst ? "CUDA libraries installed" : "Download CUDA libraries");
+        uiSetText(cudaStatus, inst && !ci.done() ? "Installed. Restart the app after installing for the first time." : ci.status());
+    }
+    void onTimer() override {
+        if (!cudaStatus) return;
+        CudaInstaller& ci = CudaInstaller::get();
+        refreshCuda();
+        if (ci.done() && !cudaAsked) {
+            cudaAsked = true;
+            if (MessageBoxW(hwnd, L"The CUDA libraries are installed.\n\nRestart the app now to start using them?", L"Dopplers Bakery", MB_YESNO | MB_ICONQUESTION) == IDYES) restartApp(hwnd);
+        }
+    }
     void onCreate() override {
         const auto& roles = rolesOf(kind);
         int y = 14, W = 640;
@@ -52,6 +80,15 @@ struct SettingsDlg : Modal {
             rows.push_back(r);
             y += 56;
         }
+        // optional GPU runtime: Vulkan is built in; CUDA allows images above 1264 px
+        uiPlace(uiMake(hwnd, L"STATIC", "GPU: Vulkan is built in (fast, images up to 1264 px). The optional CUDA libraries (about 0.45 GB, downloaded from github.com/ggml-org/llama.cpp) allow larger images.", SS_LEFT), 14, y + 4, W - 28, 34);
+        cudaBtn = uiMake(hwnd, L"BUTTON", "Download CUDA libraries", BS_PUSHBUTTON | WS_TABSTOP, 301);
+        uiPlace(cudaBtn, 14, y + 42, 190, 28);
+        cudaStatus = uiMake(hwnd, L"STATIC", "", SS_LEFT | SS_ENDELLIPSIS);
+        uiPlace(cudaStatus, 212, y + 48, W - 226, 18);
+        refreshCuda();
+        y += 84;
+        SetTimer(hwnd, 1, 300, nullptr);
         uiPlace(uiMake(hwnd, L"BUTTON", "Search in folder...", BS_PUSHBUTTON | WS_TABSTOP, 300), 14, y + 6, 150, 28);
         status = uiMake(hwnd, L"STATIC", "", SS_LEFT | SS_ENDELLIPSIS);
         uiPlace(status, 172, y + 12, W - 172 - 220, 18);
@@ -70,6 +107,8 @@ struct SettingsDlg : Modal {
             if (std::string(r.role->exts) == "dir") ok = pickFolder(hwnd, p, L"Select the model folder");
             else ok = pickFile(hwnd, p, L"Model files\0*.safetensors;*.gguf;*.pth;*.bin;*.ckpt;*.pt\0All files\0*.*\0");
             if (ok) fill(r, p);
+        } else if (id == 301) {
+            if (MessageBoxW(hwnd, L"Download the CUDA libraries (about 450 MB) from github.com/ggml-org/llama.cpp and unpack them next to the program?\n\nThey need an NVIDIA GPU with a recent driver. The app has to be restarted afterwards.", L"Download CUDA libraries", MB_YESNO | MB_ICONQUESTION) == IDYES) { CudaInstaller::get().start(); refreshCuda(); }
         } else if (id == 300) {
             std::string folder;
             if (!pickFolder(hwnd, folder, L"Select a folder to search (subfolders are included)")) return;

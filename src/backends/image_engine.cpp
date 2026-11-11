@@ -33,6 +33,9 @@ double secs(std::chrono::steady_clock::time_point a) { return std::chrono::durat
 std::string trim(const std::string& s) { size_t a = s.find_first_not_of(" \r\n\t"), b = s.find_last_not_of(" \r\n\t"); return a == std::string::npos ? "" : s.substr(a, b - a + 1); }
 }  // namespace
 
+// models are tied to the backend: drop them when the backend is switched
+static const bool g_hookImage = (Compute::get().addResetHook([] { g.te.unload(); g.dit.unload(); g.vae.unload(); g.venc.unload(); g.tePath.clear(); g.ditKey.clear(); g.vaePath.clear(); g.vencPath.clear(); }), true);
+
 bool runImage(const Job& job, JobCtl& ctl, std::string& err) {
     const Json& p = job.params;
     std::string ditPath = p.str("model"), tePath = p.str("clip"), vaePath = p.str("vae"), loraPath = p.str("lora");
@@ -43,6 +46,29 @@ bool runImage(const Job& job, JobCtl& ctl, std::string& err) {
     std::string prompt = pre.empty() ? main : (main.empty() ? pre : pre + " " + main);
     if (prompt.empty()) { err = "Prompt is empty."; return false; }
     int W = p.integer("width", 720), H = p.integer("height", 720);
+    // pick the backend first: Vulkan is fast but renders noise when the DiT sees more than ~6500 tokens in total (cap kept a little lower), CUDA has no such limit
+    std::string backendKind;
+    int seqEst = 0;
+    {
+        std::string eb;
+        const int thr0 = std::max(4u, std::thread::hardware_concurrency());
+        if (!Compute::get().use(p.str("backend"), thr0, eb)) { err = eb; return false; }
+        backendKind = Compute::get().kind();
+        if (backendKind == "vulkan") {
+            if (!g.tokOk) { if (!g.tok.load("", err)) return false; g.tokOk = true; }
+            seqEst = (int)g.tok.encode(krea2Template(prompt)).size();      // text tokens count against the same budget
+        }
+    }
+    const auto capToBackend = [&](int& w, int& h) {
+        if (backendKind != "vulkan") return;
+        const double budget = 6450.0 - seqEst - 24;                        // image tokens: one per 16x16 pixels
+        const double toks = std::ceil(w / 16.0) * std::ceil(h / 16.0);
+        if (toks <= budget) return;
+        const double s = std::sqrt(budget / toks);
+        w = std::max(64, (int)(w * s) / 16 * 16); h = std::max(64, (int)(h * s) / 16 * 16);
+        ctl.progress(0.0f, "size reduced to " + std::to_string(w) + "x" + std::to_string(h) + " (the Vulkan backend cannot render larger; use CUDA for big images)");
+    };
+    capToBackend(W, H);
     // image-to-image: the picture sets the aspect ratio; its longest side becomes max(width, height)
     const std::string initPath = trim(p.str("init_image"));
     const float strength = (float)std::min(1.0, std::max(0.02, p.num("denoise", 0.6)));
@@ -50,6 +76,7 @@ bool runImage(const Job& job, JobCtl& ctl, std::string& err) {
     if (!initPath.empty()) {
         if (!loadImage(initPath, initImg, err)) return false;
         fitSize8(initImg.w, initImg.h, std::max(W, H), W, H);
+        capToBackend(W, H);
         resizeToFloat(initImg, W, H, initPix);
     }
     int latW = W / 8, latH = H / 8;

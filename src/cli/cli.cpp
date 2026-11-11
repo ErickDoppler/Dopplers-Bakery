@@ -5,6 +5,7 @@
 #include "backends/engines.h"
 #include <windows.h>
 #include "chat/agent.h"
+#include "core/cuda_libs.h"
 #include "web/server.h"
 #include "core/queue.h"
 #include "core/download.h"
@@ -160,6 +161,36 @@ int runServeCli(const std::vector<std::string>& a) {
     for (;;) Sleep(1000);
 }
 
+// cuda-install: download the optional CUDA libraries next to the exe (the window offers the same in Model settings)
+int runCudaInstallCli() {
+    if (cudaLibsInstalled()) { fprintf(stdout, "CUDA libraries are already installed.\n"); return 0; }
+    CudaInstaller& ci = CudaInstaller::get();
+    ci.start();
+    std::string last;
+    while (ci.running()) { std::string s = ci.status(); if (s != last) { fprintf(stderr, "\r%-70s", s.c_str()); last = s; } Sleep(500); }
+    fprintf(stderr, "\n%s\n", ci.status().c_str());
+    return ci.done() ? 0 : 1;
+}
+
+// switch-test: two small image jobs on different backends in one process (checks the runtime CUDA/Vulkan switch)
+int runSwitchTestCli() {
+    JobQueue& q = JobQueue::get();
+    q.start();
+    std::vector<int> ids;
+    for (const char* be : {"Vulkan", "CUDA", "Vulkan"}) {
+        Json form = Json::object();
+        form["prompt"] = "a red fox in snow"; form["width"] = 512; form["height"] = 512; form["steps"] = 2; form["seed"] = 3; form["backend"] = be;
+        ids.push_back(q.add(Kind::Image, makeJobParams(Kind::Image, form), std::string("switch ") + be));
+    }
+    for (int id : ids) {
+        Job j;
+        for (;;) { if (q.find(id, j) && (j.state == JobState::Done || j.state == JobState::Failed || j.state == JobState::Canceled)) break; Sleep(300); }
+        fprintf(stdout, "job %d (%s): %s | %s%s\n", id, j.title.c_str(), stateName(j.state), j.status.c_str(), j.error.empty() ? "" : (" ERROR " + j.error).c_str());
+    }
+    q.shutdown();
+    return 0;
+}
+
 int runCli(const std::vector<std::string>& a) {
     if (a.empty() || a[0] == "help" || a[0] == "--help" || a[0] == "-h") { usage(); return 0; }
     Settings::get().load();
@@ -180,6 +211,8 @@ int runCli(const std::vector<std::string>& a) {
     if (a[0] == "selftest-codec") return runCodecTest(std::vector<std::string>(a.begin() + 1, a.end()));
     if (a[0] == "selftest-sa-dit") return runSaDiTTest(std::vector<std::string>(a.begin() + 1, a.end()));
     if (a[0] == "selftest-sa-vae") return runSaVaeTest(std::vector<std::string>(a.begin() + 1, a.end()));
+    if (a[0] == "switch-test") return runSwitchTestCli();
+    if (a[0] == "cuda-install") return runCudaInstallCli();
     if (a[0] == "serve") return runServeCli(std::vector<std::string>(a.begin() + 1, a.end()));
     if (a[0] == "chat") return runChatCli(std::vector<std::string>(a.begin() + 1, a.end()));
 

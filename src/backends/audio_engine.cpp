@@ -81,6 +81,8 @@ std::vector<float> simpleSigmas(int steps) {
 }
 }  // namespace
 
+static const bool g_hookAudio = (Compute::get().addResetHook([] { g.te.unload(); g.dit.unload(); g.vae.unload(); g.tePath.clear(); g.ckptPath.clear(); }), true);
+
 bool runAudio(const Job& job, JobCtl& ctl, std::string& err) {
     const Json& p = job.params;
     std::string ckpt = p.str("model"), tePath = p.str("clip");

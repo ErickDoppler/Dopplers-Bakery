@@ -1,5 +1,6 @@
 #include "core/forms.h"
 #include "core/settings.h"
+#include "gpu/compute.h"
 
 const std::vector<Field>& fieldsOf(Kind k) {
     static const std::vector<Field> llm = {
@@ -26,7 +27,8 @@ const std::vector<Field>& fieldsOf(Kind k) {
         {"seed", "Seed (-1 = random)", FT::Int, -1, -1, 2147483647, "", "", 0},
         {"format", "File format", FT::Combo, 0, 0, 0, "wav", "wav|mp3", 0},
     };
-    static const std::vector<Field> img = {
+    static const std::vector<Field> img = [] {
+        std::vector<Field> v = {
         {"pre_prompt", "Pre prompt", FT::Multi, 0, 0, 0, "", "", 2},
         {"prompt", "Prompt", FT::Multi, 0, 0, 0, "", "", 5},
         {"negative", "Negative prompt", FT::Multi, 0, 0, 0, "", "", 3},
@@ -40,7 +42,11 @@ const std::vector<Field>& fieldsOf(Kind k) {
         {"scheduler", "Scheduler", FT::Combo, 0, 0, 0, "beta", "beta|simple", 0},
         {"seed", "Seed (-1 = random)", FT::Int, -1, -1, 2147483647, "", "", 0},
         {"lora_strength", "LoRA strength", FT::Float, 0.9, -2, 2, "", "", 0},
-    };
+        };
+        if (Compute::hasCuda())      // only offered when the CUDA libraries are installed (Model settings > Download CUDA libraries)
+            v.insert(v.begin() + 5, {"backend", "Backend: Vulkan = fast, up to 1264 px; CUDA = any size, slower", FT::Combo, 0, 0, 0, "Vulkan", "Vulkan|CUDA", 0});
+        return v;
+    }();
     static const std::vector<Field> aud = {
         {"prompt", "Prompt", FT::Multi, 0, 0, 0, "", "", 5},
         {"mode", "Kind of audio", FT::Combo, 0, 0, 0, "Music", "Music|Instrument|SFX|One-shot", 0},

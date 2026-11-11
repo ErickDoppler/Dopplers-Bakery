@@ -4,6 +4,7 @@
 #include "core/forms.h"
 #include "core/queue.h"
 #include "core/settings.h"
+#include "gpu/compute.h"
 
 namespace {
 const int kMaxToolsPerTurn = 3, kMaxRounds = 2, kKeepHistory = 24;
@@ -55,7 +56,7 @@ std::string ChatAgent::systemPrompt() {
     int n = 0;
     if (Settings::get().tabReady(Kind::Image, &why))
         s += std::to_string(++n) + ". generate_image - arguments: prompt (English; a rich description: subject, setting, lighting, lens, mood), "
-             "width and height (optional integers, multiples of 8 between 256 and 1536, default 720; with an input image only the larger one matters), steps (optional, default 10), "
+             "width and height (optional integers, multiples of 8 between 256 and " + std::to_string(std::min(1536, Compute::imageSideLimit(Settings::get().form(Kind::Image).str("backend")))) + ", default 720; with an input image only the larger one matters), steps (optional, default 10), "
              "image (optional: an id such as \"img1\" from an attached or earlier made picture, or \"last\"; the picture is edited instead of drawing from scratch - then prompt must describe the WHOLE desired result), "
              "strength (optional, 0.2-1.0, how much to change the input image, default 0.6; 0.3 small tweak, 0.8 big change).\n";
     if (Settings::get().tabReady(Kind::Audio, &why))
@@ -129,7 +130,11 @@ bool ChatAgent::launchCall(const Call& c, std::vector<Pending>& pending, Json& r
         if (prompt.empty()) return fail("missing prompt");
         Json form = Json::object();
         form["prompt"] = prompt; form["negative"] = c.args.str("negative");
-        form["width"] = clampInt(c.args.num("width", 720) / 8 * 8, 256, 1536); form["height"] = clampInt(c.args.num("height", 720) / 8 * 8, 256, 1536);
+        std::string be = Settings::get().form(Kind::Image).str("backend");                 // the Backend chosen on the Text to image tab
+        for (auto& ch : be) ch = (char)tolower((unsigned char)ch);
+        form["backend"] = be;
+        const int lim = std::min(1536, Compute::imageSideLimit(be));
+        form["width"] = clampInt(c.args.num("width", 720) / 8 * 8, 256, lim); form["height"] = clampInt(c.args.num("height", 720) / 8 * 8, 256, lim);
         form["steps"] = clampInt(c.args.num("steps", 10), 1, 40); form["seed"] = -1;
         std::string imgId = trim(c.args.str("image"));
         if (!imgId.empty()) {

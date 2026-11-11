@@ -6,6 +6,8 @@
 HFONT uiFont();
 HWND uiMake(HWND parent, const wchar_t* cls, const std::string& text, DWORD style, int id = 0, DWORD ex = 0);
 void uiPlace(HWND h, int x, int y, int w, int hgt);
+void uiBatchBegin(HWND parent, int n);       // uiPlace calls on children of `parent` are applied together at uiBatchEnd
+void uiBatchEnd();
 std::string uiText(HWND h);
 void uiSetText(HWND h, const std::string& s);
 

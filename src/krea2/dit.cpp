@@ -211,7 +211,8 @@ bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sig
     ggml_context* c = ggml_init(ip);
 
     std::vector<std::pair<std::string, ggml_tensor*>> taps;
-    auto tap = [&](const char* n, ggml_tensor* x) { if (debug) { ggml_set_output(x); taps.push_back({n, x}); } };
+    static const bool statsOn = getenv("BAKERY_DIT_STATS") != nullptr;                // prints mean/std/NaN count of a few intermediate tensors
+    auto tap = [&](const char* n, ggml_tensor* x) { if (debug || statsOn) { ggml_set_output(x); taps.push_back({n, x}); } };
     ggml_tensor* imgIn = ggml_new_tensor_2d(c, GGML_TYPE_F32, 64, nImg); ggml_set_input(imgIn);
     ggml_tensor* ctxIn = ggml_new_tensor_3d(c, GGML_TYPE_F32, kTxtDim, kTxtLayers, seq); ggml_set_input(ctxIn);
     ggml_tensor* tIn = ggml_new_tensor_1d(c, GGML_TYPE_F32, 256); ggml_set_input(tIn);
@@ -251,7 +252,7 @@ bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sig
         h = ggml_mul(c, ggml_rms_norm(c, x, 1e-5f), b.post);
         h = ggml_add(c, ggml_mul(c, h, ggml_scale_bias(c, postS, 1.0f, 1.0f)), postH);
         x = ggml_add(c, x, ggml_mul(c, swiglu(c, b, h), postG));
-        if (debug && (i <= 1 || i % 4 == 3)) { static std::vector<std::string> names; names.push_back("blk" + std::to_string(i)); tap(names.back().c_str(), x); }
+        if ((debug || statsOn) && (i <= 1 || i % 4 == 3)) { static std::vector<std::string> names; names.push_back("blk" + std::to_string(i)); tap(names.back().c_str(), x); }
     }
 
     // final layer on the image tokens only
@@ -300,7 +301,11 @@ bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sig
     if (ggml_backend_sched_graph_compute(cm.sched, g) != GGML_STATUS_SUCCESS) { err = "DiT compute failed"; ggml_free(c); return false; }
 
     dump.clear();
-    for (auto& tp : taps) { std::vector<float> v(ggml_nelements(tp.second)); ggml_backend_tensor_get(tp.second, v.data(), 0, v.size() * 4); dump.push_back({tp.first, v}); }
+    for (auto& tp : taps) {
+        std::vector<float> v(ggml_nelements(tp.second)); ggml_backend_tensor_get(tp.second, v.data(), 0, v.size() * 4);
+        if (statsOn) { double s = 0, q = 0; size_t bad = 0; for (float f : v) { if (!std::isfinite(f)) { bad++; continue; } s += f; q += (double)f * f; } double m = s / v.size(); fprintf(stderr, "[dit N=%d] %-8s mean %9.4f std %9.4f nonfinite %zu\n", N, tp.first.c_str(), m, std::sqrt(std::max(0.0, q / v.size() - m * m)), bad); }
+        if (debug) dump.push_back({tp.first, v});
+    }
     std::vector<float> o((size_t)nImg * 64);
     ggml_backend_tensor_get(res, o.data(), 0, o.size() * sizeof(float));
     out.assign((size_t)16 * H * W, 0.0f);

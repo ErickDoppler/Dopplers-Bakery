@@ -17,6 +17,12 @@ static CatEntry one(const char* id, const char* label, Kind k, const char* url, 
     e.files.push_back({url, rel, size}); return e;
 }
 
+// where a catalog file goes: models<rel>, or next to the exe for "@exe/<rel>" (CUDA libraries)
+static std::string destFor(const std::string& rel) {
+    if (rel.rfind("@exe/", 0) == 0) return sys::join(sys::exeDir(), rel.substr(5));
+    return sys::join(sys::modelsDir(), rel);
+}
+
 std::vector<CatEntry> loadCatalog() {
     std::vector<CatEntry> c;
     // LLM (Qwen)
@@ -250,7 +256,7 @@ void Downloader::start(std::vector<CatEntry> entries) {
         std::vector<CatFile> need;
         unsigned long long total = 0;
         for (auto& f : todo) {
-            std::string dest = sys::join(sys::modelsDir(), f.rel);
+            std::string dest = destFor(f.rel);
             if (sys::exists(dest) && (f.size == 0 || sys::fileSize(dest) == f.size)) continue;
             need.push_back(f); total += f.size;
         }
@@ -259,7 +265,7 @@ void Downloader::start(std::vector<CatEntry> entries) {
         int idx = 0;
         for (auto& f : need) {
             { std::lock_guard<std::mutex> g(st.m); st.current = f.rel; st.fileIndex = ++idx; }
-            std::string dest = sys::join(sys::modelsDir(), f.rel);
+            std::string dest = destFor(f.rel);
             for (char& c : dest) if (c == '/') c = '\\';
             bool ok = false;
             for (int attempt = 0; attempt < 3 && !ok && !st.cancel; attempt++) {

@@ -163,7 +163,7 @@ void JobQueue::loop() {
                 Job& j = jobs_[i];
                 j.tEnd = sys::now();
                 if (cancelFlag_) { j.state = JobState::Canceled; j.status = "cancelled"; }
-                else if (ok) { j.state = JobState::Done; j.progress = 1; j.status = "done"; }
+                else if (ok) { j.state = JobState::Done; if (j.progress < 1.0f || j.status.empty()) j.status = "done"; j.progress = 1; }      // engines end with a summary at 100 %: keep it
                 else { j.state = JobState::Failed; j.error = err; j.status = "failed"; }
             }
             cancelFlag_ = false;

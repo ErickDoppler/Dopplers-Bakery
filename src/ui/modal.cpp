@@ -20,7 +20,17 @@ HWND uiMake(HWND parent, const wchar_t* cls, const std::string& text, DWORD styl
     SendMessageW(h, WM_SETFONT, (WPARAM)uiFont(), TRUE);
     return h;
 }
-void uiPlace(HWND h, int x, int y, int w, int hgt) { MoveWindow(h, x, y, w, hgt, TRUE); }
+static HDWP s_dwp = nullptr; static HWND s_dwpParent = nullptr;
+void uiBatchBegin(HWND parent, int n) { s_dwp = BeginDeferWindowPos(n); s_dwpParent = parent; }
+void uiBatchEnd() { if (s_dwp) EndDeferWindowPos(s_dwp); s_dwp = nullptr; s_dwpParent = nullptr; }
+void uiPlace(HWND h, int x, int y, int w, int hgt) {
+    if (s_dwp && GetParent(h) == s_dwpParent) {                    // one atomic move of all siblings: no half-laid-out frames while dragging the edge
+        HDWP n = DeferWindowPos(s_dwp, h, nullptr, x, y, w, hgt, SWP_NOZORDER | SWP_NOACTIVATE);
+        if (n) { s_dwp = n; return; }
+        s_dwp = nullptr;
+    }
+    MoveWindow(h, x, y, w, hgt, TRUE);
+}
 std::string uiText(HWND h) {
     int n = GetWindowTextLengthW(h);
     std::wstring w(n + 1, 0);

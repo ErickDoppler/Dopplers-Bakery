@@ -19,6 +19,7 @@ A native C++ app (ggml / llama.cpp), no Python, no ComfyUI, no cloud. Talk to th
 ## Requirements
 - Windows 10/11 64-bit, CPU with AVX2 (2013+), ~36 GB free disk space, 16 GB+ RAM recommended.
 - GPU with current Vulkan drivers (NVIDIA / AMD / Intel) for usable speed. Measured on an RTX 3080 Ti: about 1.5 s per image step at 720×720; 20 s of audio in about 8 s (after the models are loaded).
+- **Image size limit on Vulkan:** the built-in Vulkan backend renders correctly up to about 1264 x 1264 px (a limit of the Vulkan driver path: above roughly 6500 DiT tokens the picture turns to noise). Larger requests are reduced automatically. For bigger images install the optional **CUDA libraries** (NVIDIA GPU, about 0.45 GB, downloaded from the llama.cpp release the app was built with): open any tab's *Model settings* and press *Download CUDA libraries*, then restart the app. After that the *Text to image* tab has a **Backend** selector (Vulkan = faster for normal sizes, CUDA = any size, e.g. 2000 x 2000) and the Width/Height sliders follow the choice. Command line: `DopplersBakery.exe cuda-install`, `image --backend CUDA`.
 
 ## Install
 1. Download `DopplersBakery-<version>-win64.zip` from the **Releases** page and unpack it anywhere (keep the folder together).

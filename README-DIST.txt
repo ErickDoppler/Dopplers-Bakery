@@ -31,3 +31,6 @@ Uses llama.cpp / ggml (MIT license, see LICENSE-llama.cpp.txt).
 Krea 2 models are under the Krea 2 license; check it before sharing generated images or the model files.
 
 License: free for personal use; enterprise use needs a paid license (US$100 per workstation). See LICENSE.txt.
+
+Images above about 1264 px: the built-in Vulkan backend cannot render them correctly (they are reduced). For larger images open a tab's
+"Model settings" and press "Download CUDA libraries" (NVIDIA GPU, about 0.45 GB), restart, then pick Backend = CUDA on the Text to image tab.

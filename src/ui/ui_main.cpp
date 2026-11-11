@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include "gpu/compute.h"
 #include "ui/chat_view.h"
 #include "web/server.h"
 #include "core/download.h"
@@ -125,6 +126,24 @@ Json readForm(Page& p) {
 void sliderLabel(FieldCtl& c) {
     int v = (int)SendMessageW(c.ctl, TBM_GETPOS, 0, 0);
     uiSetText(c.label, std::string(c.f->label) + ": " + std::to_string(v));
+}
+
+// Width/Height can only go as high as the chosen backend renders correctly (Vulkan 1264 px, CUDA much more).
+void applyImageLimits(Page& p, bool fromSelection = false) {
+    if (p.kind != Kind::Image) return;
+    std::string pref;
+    for (auto& c : p.fc) if (!strcmp(c.f->key, "backend")) {
+        int s = (int)SendMessageW(c.ctl, CB_GETCURSEL, 0, 0);
+        if (fromSelection && s >= 0) { wchar_t b[32] = {}; SendMessageW(c.ctl, CB_GETLBTEXT, s, (LPARAM)b); pref = sys::narrow(b); }
+        else pref = uiText(c.ctl);
+    }
+    for (auto& ch : pref) ch = (char)tolower((unsigned char)ch);
+    int lim = Compute::imageSideLimit(pref);
+    for (auto& c : p.fc) if (!strcmp(c.f->key, "width") || !strcmp(c.f->key, "height")) {
+        SendMessageW(c.ctl, TBM_SETRANGE, TRUE, MAKELONG((int)c.f->mn, lim));
+        if ((int)SendMessageW(c.ctl, TBM_GETPOS, 0, 0) > lim) SendMessageW(c.ctl, TBM_SETPOS, TRUE, lim);
+        sliderLabel(c);
+    }
 }
 
 void writeForm(Page& p, const Json& saved) {
@@ -308,6 +327,7 @@ LRESULT CALLBACK pageProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         switch (LOWORD(wp)) {
         case IDC_CREATE: onCreateClicked(*p); return 0;
         default:
+            if (p->kind == Kind::Image && LOWORD(wp) >= IDC_FIELD0 && LOWORD(wp) < IDC_FIELD0 + 64 && (HIWORD(wp) == CBN_SELCHANGE || HIWORD(wp) == CBN_EDITCHANGE || HIWORD(wp) == CBN_CLOSEUP)) { applyImageLimits(*p, HIWORD(wp) == CBN_SELCHANGE); return 0; }
             if (LOWORD(wp) >= IDC_BROWSE0 && LOWORD(wp) < IDC_BROWSE0 + 64) {          // "..." next to a file field
                 size_t idx = LOWORD(wp) - IDC_BROWSE0;
                 if (idx < p->fc.size()) {
@@ -408,6 +428,7 @@ void buildPage(Page& p, Kind kind) {
     p.bDelete = uiMake(p.hwnd, L"BUTTON", "Delete", BS_PUSHBUTTON | WS_TABSTOP, IDC_DELETE);
     Json saved = Settings::get().form(kind);
     writeForm(p, saved);
+    applyImageLimits(p);
 }
 
 // ----------------------------------------------------------------- queue panel
@@ -613,7 +634,7 @@ void setQueueVisible(bool v) {
     saveQueueUi();
 }
 
-void layoutMain() {
+void layoutMainImpl() {
     RECT rc; GetClientRect(g_main, &rc);
     int W = rc.right, H = rc.bottom;
     int qW = queueWidth(W);
@@ -623,7 +644,7 @@ void layoutMain() {
     uiPlace(g_tab, 4, 4, tabW - 4, H - 8);
     RECT tr = {4, 4, 4 + tabW - 4, 4 + H - 8};
     TabCtrl_AdjustRect(g_tab, FALSE, &tr);
-    for (auto& p : g_pages) { uiPlace(p.hwnd, tr.left, tr.top, tr.right - tr.left, tr.bottom - tr.top); layoutPage(p); }
+    for (auto& p : g_pages) { uiPlace(p.hwnd, tr.left, tr.top, tr.right - tr.left, tr.bottom - tr.top); }
     uiPlace(chatViewHwnd(), tr.left, tr.top, tr.right - tr.left, tr.bottom - tr.top);
     int x = W - qW, w = qW - 6;
     uiSetText(g_qToggle, g_qVis ? "Hide \xE2\x80\xBA" : "\xE2\x80\xB9");
@@ -641,9 +662,18 @@ void layoutMain() {
 
 }
 
+void layoutMain() {
+    uiBatchBegin(g_main, 64);                    // move every child of the window in one go (no flicker, no half-laid-out frames)
+    layoutMainImpl();
+    uiBatchEnd();
+    for (auto& p : g_pages) layoutPage(p);       // the pages read their own size, so they follow once the move is done
+    RedrawWindow(g_main, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+}
+
 void showSelectedPage() {
     int s = TabCtrl_GetCurSel(g_tab);
     for (int i = 0; i < kKindCount; i++) ShowWindow(g_pages[i].hwnd, i + 1 == s ? SW_SHOW : SW_HIDE);      // tab 0 is Chat
+    if (s >= 1 && s <= kKindCount) RedrawWindow(g_pages[s - 1].hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);   // a page shown for the first time must paint all of its controls
     chatViewShow(s == 0);
 }
 
@@ -823,7 +853,7 @@ int runGui(HINSTANCE inst) {
 
     WNDCLASSW wc = {};
     wc.hInstance = inst; wc.hCursor = LoadCursorW(nullptr, IDC_ARROW); wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.style = CS_DBLCLKS; wc.lpfnWndProc = mainProc; wc.lpszClassName = L"BakeryMain"; wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
+    wc.style = CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW; wc.lpfnWndProc = mainProc; wc.lpszClassName = L"BakeryMain"; wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
     RegisterClassW(&wc);
     wc.lpfnWndProc = pageProc; wc.lpszClassName = L"BakeryPage"; wc.hIcon = nullptr; RegisterClassW(&wc);
     wc.lpfnWndProc = formProc; wc.lpszClassName = L"BakeryForm"; RegisterClassW(&wc);

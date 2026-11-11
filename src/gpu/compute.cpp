@@ -1,6 +1,7 @@
 #include "gpu/compute.h"
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <thread>
 #include "util/sys.h"
 
@@ -8,12 +9,55 @@ Compute& Compute::get() { static Compute c; return c; }
 
 static std::string lowerStr(std::string s) { for (auto& c : s) c = (char)tolower((unsigned char)c); return s; }
 
+static bool g_hasCuda = false, g_hasVulkan = false;
+void Compute::probe() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        ggml_backend_load_all_from_path(sys::exeDir().c_str());
+        for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
+            ggml_backend_dev_t d = ggml_backend_dev_get(i);
+            if (ggml_backend_dev_type(d) != GGML_BACKEND_DEVICE_TYPE_GPU) continue;
+            std::string n = lowerStr(ggml_backend_dev_name(d));
+            if (n.find("cuda") != std::string::npos) g_hasCuda = true;
+            if (n.find("vulkan") != std::string::npos) g_hasVulkan = true;
+        }
+    });
+}
+bool Compute::hasCuda() { probe(); return g_hasCuda; }
+bool Compute::hasVulkan() { probe(); return g_hasVulkan; }
+int Compute::imageSideLimit(const std::string& prefIn) {
+    std::string p = lowerStr(prefIn);
+    if (const char* e = getenv("BAKERY_BACKEND")) p = lowerStr(e);
+    bool vk = p == "vulkan" || ((p.empty() || p == "auto") && hasVulkan());
+    if (p == "cuda" && !hasCuda()) vk = hasVulkan();
+    return vk ? 1264 : 5000;
+}
+
+void Compute::shutdown() {
+    if (schedCpu) ggml_backend_sched_free(schedCpu);
+    if (sched) ggml_backend_sched_free(sched);
+    if (gpu) ggml_backend_free(gpu);
+    if (cpu) ggml_backend_free(cpu);
+    schedCpu = sched = nullptr; gpu = cpu = nullptr; gpuDev = nullptr; inited = false; desc.clear(); activeKind = "cpu";
+}
+
+bool Compute::use(const std::string& prefIn, int threads, std::string& err) {
+    std::string want = prefIn.empty() ? "auto" : lowerStr(prefIn);
+    if (inited) {
+        if (want == "auto" || want == activeKind || getenv("BAKERY_BACKEND")) return true;
+        if ((want == "cuda" && !hasCuda()) || (want == "vulkan" && !hasVulkan())) return true;      // not available: keep what we have
+        for (auto& h : hooks) h();                       // engines free their models (they are tied to the old backend)
+        shutdown();
+    }
+    return init(threads, err, want);
+}
+
 bool Compute::init(int threads, std::string& err, const std::string& prefIn) {
     if (inited) return true;
     std::string pref = prefIn;
     if (const char* e = getenv("BAKERY_BACKEND")) pref = lowerStr(e);
 
-    ggml_backend_load_all_from_path(sys::exeDir().c_str());
+    probe();
 
     ggml_backend_dev_t cpuDev = nullptr, best = nullptr;
     int bestScore = -1;
@@ -23,10 +67,10 @@ bool Compute::init(int threads, std::string& err, const std::string& prefIn) {
         std::string name = lowerStr(ggml_backend_dev_name(d));
         if (type == GGML_BACKEND_DEVICE_TYPE_CPU) { if (!cpuDev) cpuDev = d; continue; }
         if (type != GGML_BACKEND_DEVICE_TYPE_GPU) continue;
-        int score = name.find("cuda") != std::string::npos ? 2 : (name.find("vulkan") != std::string::npos ? 1 : 0);
+        int score = name.find("vulkan") != std::string::npos ? 2 : (name.find("cuda") != std::string::npos ? 1 : 0);      // auto: Vulkan first
         if (pref == "cpu") continue;
-        if (pref == "cuda" && score != 2) continue;
-        if (pref == "vulkan" && score != 1) continue;
+        if (pref == "cuda" && score != 1) continue;
+        if (pref == "vulkan" && score != 2) continue;
         if (score > bestScore) { bestScore = score; best = d; }
     }
     if (!cpuDev) { err = "no CPU backend found (ggml-cpu-*.dll missing next to the exe?)"; return false; }
@@ -44,6 +88,7 @@ bool Compute::init(int threads, std::string& err, const std::string& prefIn) {
         }
     }
     if (!gpu) desc = "CPU";
+    activeKind = !gpu ? "cpu" : (lowerStr(ggml_backend_dev_name(best)).find("cuda") != std::string::npos ? "cuda" : "vulkan");
     ggml_backend_t list[2]; int n = 0;
     if (gpu) list[n++] = gpu;
     list[n++] = cpu;
@@ -66,7 +111,7 @@ ggml_backend_buffer_t Compute::allocWeights(ggml_context* ctx) {
 #include <cstdio>
 // `DopplersBakery backends`: list what ggml found next to the exe
 int runBackendsList() {
-    ggml_backend_load_all_from_path(sys::exeDir().c_str());
+    Compute::probe();
     for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
         ggml_backend_dev_t d = ggml_backend_dev_get(i);
         size_t freeMem = 0, total = 0; ggml_backend_dev_memory(d, &freeMem, &total);

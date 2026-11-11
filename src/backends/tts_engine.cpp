@@ -41,6 +41,8 @@ bool encodeReferenceCodes(const std::string& dir, const std::vector<float>& wav,
 double secs(std::chrono::steady_clock::time_point a) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count(); }
 }  // namespace
 
+static const bool g_hookTts = (Compute::get().addResetHook([] { g.talker.unload(); g.decoder.unload(); g.spk.unload(); g.codec.unload(); g.dir.clear(); g.spkDir.clear(); g.codecDir.clear(); }), true);
+
 bool runTTS(const Job& job, JobCtl& ctl, std::string& err) {
     const Json& p = job.params;
     std::string dir = p.str("model");
