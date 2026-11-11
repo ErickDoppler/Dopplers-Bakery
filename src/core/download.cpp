@@ -22,24 +22,21 @@ std::vector<CatEntry> loadCatalog() {
     // LLM (Qwen)
     c.push_back(one("llm-qwen3-4b", "Qwen3 4B Instruct 2507 (Q4_K_M)", Kind::LLM,
         "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
-        "LLM/Qwen3-4B-Instruct-2507-Q4_K_M.gguf", 2497000000ull));
+        "LLM/Qwen3-4B-Instruct-2507-Q4_K_M.gguf", 2497281120ull));
     // TTS (Qwen3-TTS, same models the ComfyUI qwen3-tts node uses)
     c.push_back(hf("tts-qwen3-custom", "Qwen3-TTS 12Hz 1.7B CustomVoice", Kind::TTS,
-        "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", "qwen-tts/Qwen3-TTS-12Hz-1.7B-CustomVoice", 4400000000ull));
+        "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", "qwen-tts/Qwen3-TTS-12Hz-1.7B-CustomVoice", 4516000000ull));
     // Audio (Stable Audio 3 medium; links from the AUDIO3-MEDIUM workflow)
     c.push_back(one("audio-sa3-medium", "Stable Audio 3 medium", Kind::Audio,
         "https://huggingface.co/Comfy-Org/stable-audio-3/resolve/main/checkpoints/stable_audio_3_medium.safetensors",
-        "checkpoints/stable_audio_3_medium.safetensors", 8795000000ull));
+        "checkpoints/stable_audio_3_medium.safetensors", 9222116660ull));
     c.push_back(one("audio-t5gemma", "T5Gemma b-b UL2 text encoder", Kind::Audio,
         "https://huggingface.co/Comfy-Org/stable-audio-3/resolve/main/text_encoders/t5gemma_b_b_ul2.safetensors",
-        "text_encoders/t5gemma_b_b_ul2.safetensors", 1132000000ull));
-    c.push_back(one("audio-qwen35-2b", "Qwen3.5 2B (prompt enhancer)", Kind::Audio,
-        "https://huggingface.co/Comfy-Org/Qwen3.5/resolve/main/text_encoders/qwen3.5_2b_bf16.safetensors",
-        "text_encoders/qwen3.5_2b_bf16.safetensors", 4338000000ull));
+        "text_encoders/t5gemma_b_b_ul2.safetensors", 1187264003ull));
     // Image (Krea2 pieces whose location is not yet confirmed come from catalog.json)
     c.push_back(one("image-qwen-vae", "Qwen-Image VAE", Kind::Image,
         "https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors",
-        "vae/qwen_image_vae.safetensors", 242000000ull));
+        "vae/qwen_image_vae.safetensors", 253806246ull));
 
     // Krea2 pieces without a verified download location: found by name through "Search in folder"
     c.push_back(one("image-krea2", "Krea2 turbo diffusion model (FP8)", Kind::Image,
@@ -50,7 +47,7 @@ std::vector<CatEntry> loadCatalog() {
         "text_encoders/qwen3vl_4b_fp8_scaled.safetensors", 5242467968ull));
     {   // which [Settings] slot each built-in entry fills
         static const char* roles[][2] = {{"llm-qwen3-4b", "model"}, {"tts-qwen3-custom", "model"}, {"audio-sa3-medium", "model"}, {"audio-t5gemma", "clip"},
-                                         {"audio-qwen35-2b", "llm"}, {"image-qwen-vae", "vae"}, {"image-krea2", "model"}, {"image-qwen3vl", "clip"}};
+                                         {"image-qwen-vae", "vae"}, {"image-krea2", "model"}, {"image-qwen3vl", "clip"}};
         for (auto& e : c) for (auto& r : roles) if (e.id == r[0]) e.role = r[1];
     }
 

@@ -12,4 +12,5 @@ for %%f in (runtime\*.dll) do (
 )
 copy /y README-DIST.txt "%OUT%\README.txt" >nul
 copy /y third_party\llama.cpp\LICENSE "%OUT%\LICENSE-llama.cpp.txt" >nul
+copy /y LICENSE "%OUT%\LICENSE.txt" >nul
 echo packaged %OUT%

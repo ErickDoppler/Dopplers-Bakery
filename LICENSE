@@ -1,0 +1,62 @@
+Dopplers Bakery Source-Available License
+Version 1.0, 2026
+
+Copyright (c) 2026 Erick Doppler. All rights reserved except as granted below.
+Licensing contact: https://github.com/ErickDoppler (open an issue or message the account).
+
+1. DEFINITIONS
+   "Software"        the Dopplers Bakery source code, binaries and documentation in this repository and its releases.
+   "Personal Use"    use by a natural person, on their own behalf and on their own computers, that is not for a business, an
+                     employer, a client, or any other organization and does not earn money or other commercial advantage.
+   "Enterprise Use"  every use that is not Personal Use, including use by or for a company, partnership, sole trader or freelancer
+                     working for clients, government body, school, university, charity or any other organization, and any use
+                     that is part of a commercial product, service or workflow.
+   "Workstation"     each physical or virtual computer (or each user profile on a shared or virtual desktop host) on which the
+                     Software is launched.
+
+2. FREE PERSONAL USE
+   You may use, copy, modify and build the Software for Personal Use without charge. You may fork it and send contributions
+   (see section 7). You may share unmodified or modified copies with other individuals for their Personal Use if you include this
+   license and the copyright notice and do not charge for them.
+
+3. ENTERPRISE USE REQUIRES A PAID LICENSE
+   Enterprise Use of the Software is not permitted unless the organization has bought a license for that use. The license fee is
+   US$100 (one hundred United States dollars) per Workstation, payable once for each Workstation that launches the Software, before
+   that Workstation first launches it. Contact the licensor (see the top of this file) to buy licenses. A paid license is personal to
+   the organization, is not transferable, and covers use of the version bought and later versions unless the licensor states otherwise.
+   Evaluating the Software for up to 30 days on a single Workstation, solely to decide whether to buy, is allowed without charge.
+
+4. RESTRICTIONS
+   Except as this license expressly allows, you may not: (a) sell, rent, sublicense or offer the Software or a modified version as a
+   product or service, or host it for others as a service; (b) remove or alter copyright or license notices; (c) circumvent or help
+   others circumvent the fee in section 3; (d) use the licensor's name or marks to endorse a derived work.
+
+5. THIRD-PARTY COMPONENTS AND MODELS
+   This license covers only the original work of the licensor. The Software uses and may ship third-party components, notably
+   llama.cpp / ggml (MIT License, see LICENSE-llama.cpp.txt), which remain under their own licenses. The AI model files that the
+   Software downloads or loads (for example Qwen3, Qwen3-TTS, Krea 2, Stable Audio 3, T5Gemma, and their derivatives) are NOT part
+   of the Software and are not licensed by the licensor. Each has its own license and use restrictions (some limit commercial use
+   or require registration). You are solely responsible for complying with them, including for anything you generate.
+   Nothing in this license grants or limits rights in those components or models.
+
+6. YOUR OUTPUT
+   The licensor claims no rights in images, audio, text or speech you create with the Software. Your rights in that output are
+   subject to the licenses of the models used and to applicable law.
+
+7. CONTRIBUTIONS
+   If you submit a contribution (for example a pull request), you grant the licensor a perpetual, worldwide, royalty-free,
+   irrevocable license to use, modify, distribute and sublicense it as part of the Software, under this or any other license.
+
+8. TERMINATION
+   This license ends automatically if you breach it. Then you must stop using the Software and delete your copies, except that
+   unpaid Enterprise Use must be paid for at the section 3 rate for the period it happened.
+
+9. NO WARRANTY AND LIMITATION OF LIABILITY
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING MERCHANTABILITY, FITNESS FOR A
+   PARTICULAR PURPOSE AND NON-INFRINGEMENT. TO THE MAXIMUM EXTENT PERMITTED BY LAW THE LICENSOR IS NOT LIABLE FOR ANY CLAIM,
+   DAMAGES OR OTHER LIABILITY ARISING FROM OR IN CONNECTION WITH THE SOFTWARE OR ITS USE, AND TOTAL LIABILITY FOR ANY CLAIM IS
+   LIMITED TO THE LICENSE FEES YOU PAID FOR THE SOFTWARE.
+
+10. GENERAL
+   If a provision is unenforceable the rest remains in effect. This is the entire license for the Software; the licensor may offer
+   other terms in writing. This license is not an open-source license as defined by the Open Source Initiative.

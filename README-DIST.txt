@@ -29,3 +29,5 @@ Command line:  DopplersBakery.exe chat --say "make me a picture of a fox"
 
 Uses llama.cpp / ggml (MIT license, see LICENSE-llama.cpp.txt).
 Krea 2 models are under the Krea 2 license; check it before sharing generated images or the model files.
+
+License: free for personal use; enterprise use needs a paid license (US$100 per workstation). See LICENSE.txt.
