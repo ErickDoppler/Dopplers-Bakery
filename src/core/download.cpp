@@ -39,9 +39,9 @@ std::vector<CatEntry> loadCatalog() {
         "vae/qwen_image_vae.safetensors", 253806246ull));
 
     // Krea2 pieces without a verified download location: found by name through "Search in folder"
-    c.push_back(one("image-krea2", "Krea2 turbo diffusion model (FP8)", Kind::Image,
-        "https://huggingface.co/AlperKTS/Krea2_FP8/resolve/main/krea2_turbo_fp8.safetensors",
-        "diffusion_models/krea2_turbo_fp8.safetensors", 12900096996ull));
+    c.push_back(one("image-krea2", "realiaKrea2 v10 (Krea 2 fine-tune, FP8)", Kind::Image,
+        "https://huggingface.co/Buattensorart2/dari_civitai/resolve/706bec4c237bd6602f9187d377dea0c9359f1c1e/diffusion_models/realiaKrea2_v10.safetensors",
+        "diffusion_models/realiaKrea2_v10.safetensors", 13141769680ull));
     c.push_back(one("image-qwen3vl", "Qwen3-VL 4B text encoder for Krea2 (FP8)", Kind::Image,
         "https://huggingface.co/AlperKTS/Krea2_FP8/resolve/main/qwen3vl_4b_fp8_scaled.safetensors",
         "text_encoders/qwen3vl_4b_fp8_scaled.safetensors", 5242467968ull));

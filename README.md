@@ -5,7 +5,7 @@ A native C++ app (ggml / llama.cpp), no Python, no ComfyUI, no cloud. Talk to th
 
 > ## ⚠️ Read this first: the app downloads gigabytes of data
 > The program itself is small (~70 MB), but it **does not contain any AI models**. To work it needs about **36 GB** of model files
-> (all features ≈ 36 GB; images only ≈ 18 GB; speech only ≈ 4.5 GB). On first launch it offers to download them from Hugging Face
+> (all features ≈ 36 GB; images only ≈ 18.6 GB; speech only ≈ 4.5 GB). On first launch it offers to download them from Hugging Face
 > (resumable). Make sure you have **free disk space, an unmetered connection and time**. A GPU with 8 GB+ VRAM (Vulkan) is recommended;
 > without a GPU it runs on the CPU, much more slowly.
 
@@ -32,12 +32,12 @@ The app reads **three kinds of model files**: `.gguf` (language model), `.safete
 |---|---|---|---|---|---|---|
 | Chat / LLM | language model (abliterated: the community removed the refusals) | `Huihui-Qwen3-4B-Instruct-2507-abliterated.Q4_K_M.gguf` | `.gguf` | 2.5 GB | `modelslm` | [link](https://huggingface.co/mradermacher/huihui-qwen3-4b-instruct-2507-abliterated-gguf/resolve/main/huihui-qwen3-4b-instruct-2507-abliterated.q4_k_m.gguf) |
 | Speech (TTS) | model folder | `Qwen3-TTS-12Hz-1.7B-CustomVoice` (whole repo, incl. `speech_tokenizer\`) | folder: `model.safetensors` 3.8 GB, `speech_tokenizer\model.safetensors` 0.7 GB, `config.json`, `generation_config.json`, `merges.txt`, `vocab.json`, `tokenizer_config.json`, `preprocessor_config.json` | 4.5 GB | `models\qwen-tts\Qwen3-TTS-12Hz-1.7B-CustomVoice\` | [repo](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) |
-| Images | diffusion model | `krea2_turbo_fp8.safetensors` | `.safetensors` | 12.9 GB | `models\diffusion_models\` | [link](https://huggingface.co/AlperKTS/Krea2_FP8/resolve/main/krea2_turbo_fp8.safetensors) |
+| Images | diffusion model (Krea 2 fine-tune) | `realiaKrea2_v10.safetensors` | `.safetensors` | 13.1 GB | `models\diffusion_models\` | [link](https://huggingface.co/Buattensorart2/dari_civitai/resolve/706bec4c237bd6602f9187d377dea0c9359f1c1e/diffusion_models/realiaKrea2_v10.safetensors) |
 | Images | text encoder | `qwen3vl_4b_fp8_scaled.safetensors` | `.safetensors` | 5.2 GB | `models\text_encoders\` | [link](https://huggingface.co/AlperKTS/Krea2_FP8/resolve/main/qwen3vl_4b_fp8_scaled.safetensors) |
 | Images | VAE | `qwen_image_vae.safetensors` | `.safetensors` | 0.25 GB | `models\vae\` | [link](https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors) |
 | Audio | audio model | `stable_audio_3_medium.safetensors` | `.safetensors` | 9.2 GB | `models\checkpoints\` | [link](https://huggingface.co/Comfy-Org/stable-audio-3/resolve/main/checkpoints/stable_audio_3_medium.safetensors) |
 | Audio | text encoder | `t5gemma_b_b_ul2.safetensors` | `.safetensors` | 1.2 GB | `models\text_encoders\` | [link](https://huggingface.co/Comfy-Org/stable-audio-3/resolve/main/text_encoders/t5gemma_b_b_ul2.safetensors) |
-| **Total** | | | | **≈ 35.8 GB** | | |
+| **Total** | | | | **≈ 36.1 GB** | | |
 
 Optional:
 - The standard, safety-tuned Qwen model instead of the abliterated one: [`Qwen3-4B-Instruct-2507-Q4_K_M.gguf`](https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf) (2.5 GB). It declines some requests; any other `.gguf` chat model also works (pick it in the LLM tab). Models are third-party: check each licence and use them responsibly.
@@ -45,8 +45,7 @@ Optional:
 - LoRA for images (`.safetensors`) and for the LLM (`.gguf`); the audio prompt enhancer uses the LLM tab's `.gguf`.
 - Other builds of the same models work if they have the same tensor layout; use **Models > Add models folder** to point at an existing ComfyUI `models` folder.
 
-Notes on the sources: these are vendor / community mirrors on Hugging Face and the links may change (checked 2026-11-11). The Krea 2 files come from a community FP8 repack
-([AlperKTS/Krea2_FP8](https://huggingface.co/AlperKTS/Krea2_FP8)) of the official [Krea 2](https://huggingface.co/krea/Krea-2-Raw) model, whose own repository is gated and under the Krea 2 license.
+Notes on the sources: these are vendor / community mirrors on Hugging Face and the links may change (checked 2026-11-11). The image model `realiaKrea2_v10` is a community fine-tune of [Krea 2](https://huggingface.co/krea/Krea-2-Raw) (FP8). It is downloaded from a third-party Hugging Face mirror of Civitai files (`Buattensorart2/dari_civitai`, link pinned to one commit; that repository also hosts unrelated adult LoRAs, only this one file is used) - the mirror can disappear, and the licence is the one on the model's Civitai page and the Krea 2 license. The Qwen3-VL text encoder comes from [AlperKTS/Krea2_FP8](https://huggingface.co/AlperKTS/Krea2_FP8) (it also hosts `krea2_turbo_fp8.safetensors`, a faster but lower-quality turbo variant that the app can use too).
 Check the license of each model before using or sharing its outputs.
 
 ## Command line
