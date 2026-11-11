@@ -163,6 +163,7 @@ int runServeCli(const std::vector<std::string>& a) {
 int runCli(const std::vector<std::string>& a) {
     if (a.empty() || a[0] == "help" || a[0] == "--help" || a[0] == "-h") { usage(); return 0; }
     Settings::get().load();
+    Settings::get().autoSelect();      // repairs empty or wrong model choices (checked by file content)
     sys::makeDirs(sys::modelsDir()); sys::makeDirs(sys::outputDir());
     if (a[0] == "models") return cmdModels(a);
     if (a[0] == "selftest") return runSelfTest(std::vector<std::string>(a.begin() + 1, a.end()));
