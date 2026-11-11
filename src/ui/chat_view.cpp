@@ -14,7 +14,8 @@
 namespace {
 enum ItemKind { K_TEXT, K_IMAGE, K_AUDIO, K_NOTE, K_TYPING, K_EMPTY };
 enum HitId { H_NONE = 0, H_IMG, H_AUDIO, H_CHIPX, H_PLUS, H_VOICE, H_SEND };
-struct Item { int kind = K_TEXT; bool user = false; int x = 0, y = 0, w = 0, h = 0; std::wstring text; std::string path; };
+struct Line { int s, e; };
+struct Item { int kind = K_TEXT; bool user = false; int x = 0, y = 0, w = 0, h = 0; std::wstring text; std::string path; std::vector<Line> lines; int lineH = 0; };
 struct Hit { RECT r; int id; int idx; std::string path; };
 struct Thumb { HBITMAP bmp = nullptr; int w = 0, h = 0; };
 
@@ -37,6 +38,10 @@ int g_contentH = 0, g_scroll = 0, g_phase = 0, g_hot = 0;
 RECT g_composer = {}, g_logRect = {}, g_statusRect = {};
 RECT g_rPlus = {}, g_rVoice = {}, g_rSend = {};
 bool g_tracking = false;
+// text selection: (item index, character index) anchor and focus
+int g_selAi = -1, g_selAc = 0, g_selBi = -1, g_selBc = 0;
+bool g_selecting = false;
+POINT g_downPt = {};
 
 std::wstring W(const std::string& s) { return sys::widen(s); }
 std::string fileOf(const std::string& p) { return p.substr(p.find_last_of("\\/") + 1); }
@@ -107,6 +112,56 @@ SIZE measure(HDC dc, const std::wstring& t, int maxW, HFONT f) {
     return {r.right, r.bottom};
 }
 
+// word-wrap `t` into lines of at most maxW pixels (own wrapping so drawing and hit-testing agree)
+void wrapLines(HDC dc, HFONT f, const std::wstring& t, int maxW, std::vector<Line>& out, int& wMax, int& lineH) {
+    HGDIOBJ o = SelectObject(dc, f);
+    TEXTMETRICW tm; GetTextMetricsW(dc, &tm);
+    lineH = tm.tmHeight + tm.tmExternalLeading + 2;
+    out.clear(); wMax = 0;
+    const int n = (int)t.size();
+    int i = 0;
+    while (i <= n) {
+        int pe = i; while (pe < n && t[pe] != L'\n') pe++;
+        int ps = i, pend = pe; if (pend > ps && t[pend - 1] == L'\r') pend--;
+        if (pend == ps) out.push_back({ps, ps});
+        else {
+            int s = ps;
+            while (s < pend) {
+                int fit = 0; SIZE sz;
+                GetTextExtentExPointW(dc, &t[s], pend - s, std::max(20, maxW), &fit, nullptr, &sz);
+                if (fit <= 0) fit = 1;
+                int e = s + fit;
+                if (e < pend) { int b = e; while (b > s && t[b - 1] != L' ') b--; if (b > s) e = b; }
+                int e2 = e; while (e2 > s && t[e2 - 1] == L' ') e2--;
+                SIZE w; GetTextExtentPoint32W(dc, &t[s], e2 - s, &w);
+                wMax = std::max<int>(wMax, w.cx);
+                out.push_back({s, e}); s = e;
+            }
+        }
+        i = pe + 1;
+    }
+    SelectObject(dc, o);
+}
+
+void selRange(int& ai, int& ac, int& bi, int& bc) {            // normalized: a <= b
+    ai = g_selAi; ac = g_selAc; bi = g_selBi; bc = g_selBc;
+    if (ai > bi || (ai == bi && ac > bc)) { std::swap(ai, bi); std::swap(ac, bc); }
+}
+bool hasSelection() { return g_selAi >= 0 && g_selBi >= 0 && !(g_selAi == g_selBi && g_selAc == g_selBc); }
+std::string selectedText() {
+    if (!hasSelection()) return "";
+    int ai, ac, bi, bc; selRange(ai, ac, bi, bc);
+    std::wstring out;
+    for (int i = ai; i <= bi && i < (int)g_items.size(); i++) {
+        const Item& it = g_items[i];
+        if (it.kind != K_TEXT) continue;
+        int s = i == ai ? ac : 0, e = i == bi ? bc : (int)it.text.size();
+        s = std::min<int>(s, (int)it.text.size()); e = std::min<int>(e, (int)it.text.size());
+        if (e > s) { if (!out.empty()) out += L"\r\n\r\n"; out += it.text.substr(s, e - s); }
+    }
+    return sys::narrow(out);
+}
+
 void buildItems(HDC dc, int W_, int colX, int colW) {
     (void)W_;
     g_items.clear();
@@ -125,8 +180,8 @@ void buildItems(HDC dc, int W_, int colX, int colW) {
         if (!m.text.empty()) {
             Item it; it.kind = K_TEXT; it.text = W(m.text);
             int maxW = user ? colW * 78 / 100 : colW, padX = user ? 16 : 2, padY = user ? 10 : 2;
-            SIZE s = measure(dc, it.text, maxW - 2 * padX, g_f);
-            it.w = s.cx + 2 * padX; it.h = s.cy + 2 * padY;
+            int wm = 0; wrapLines(dc, g_f, it.text, maxW - 2 * padX, it.lines, wm, it.lineH);
+            it.w = wm + 2 * padX + 2; it.h = (int)it.lines.size() * it.lineH + 2 * padY;
             add(it, user);
         }
         for (auto& f : m.files) {
@@ -145,7 +200,7 @@ void buildItems(HDC dc, int W_, int colX, int colW) {
     }
     if (g_busy) {
         y += 14;
-        if (!g_live.empty()) { Item it; it.kind = K_TEXT; it.text = W(g_live); SIZE s = measure(dc, it.text, colW - 4, g_f); it.w = s.cx + 4; it.h = s.cy + 4; add(it, false); }
+        if (!g_live.empty()) { Item it; it.kind = K_TEXT; it.text = W(g_live); int wm = 0; wrapLines(dc, g_f, it.text, colW - 4, it.lines, wm, it.lineH); it.w = wm + 6; it.h = (int)it.lines.size() * it.lineH + 4; add(it, false); }
         else { Item it; it.kind = K_TYPING; it.w = 52; it.h = 28; add(it, false); }
     }
     if (g_tr.empty() && !g_busy) { g_items.clear(); Item it; it.kind = K_EMPTY; it.x = colX; it.w = colW; it.h = 90; it.y = 0; g_items.push_back(it); y = 0; }
@@ -231,10 +286,27 @@ void paintItem(HDC dc, const Item& it, int yy) {
     switch (it.kind) {
     case K_TEXT: {
         if (it.user) fillRound(dc, r, cUser, cUser, 18);
-        RECT tr = r; int padX = it.user ? 16 : 2, padY = it.user ? 10 : 2;
-        tr.left += padX; tr.right -= padX; tr.top += padY;
-        SetTextColor(dc, cText); SelectObject(dc, g_f);
-        DrawTextW(dc, it.text.c_str(), -1, &tr, DT_WORDBREAK | DT_NOPREFIX);
+        int padX = it.user ? 16 : 2, padY = it.user ? 10 : 2;
+        SelectObject(dc, g_f);
+        int idx = (int)(&it - &g_items[0]);
+        int ai = 0, ac = 0, bi = 0, bc = 0; bool sel = hasSelection();
+        if (sel) selRange(ai, ac, bi, bc);
+        for (size_t li = 0; li < it.lines.size(); li++) {
+            const Line& L = it.lines[li];
+            int ly = yy + padY + (int)li * it.lineH;
+            if (sel && idx >= ai && idx <= bi) {
+                int s = idx == ai ? ac : 0, e = idx == bi ? bc : (int)it.text.size();
+                int ss = std::max(s, L.s), ee = std::min(e, L.e);
+                if (ee > ss) {
+                    SIZE a = {0, 0}, b2 = {0, 0};
+                    if (ss > L.s) GetTextExtentPoint32W(dc, &it.text[L.s], ss - L.s, &a);
+                    GetTextExtentPoint32W(dc, &it.text[L.s], ee - L.s, &b2);
+                    HBRUSH hb = CreateSolidBrush(RGB(176, 204, 250)); RECT sr = {it.x + padX + a.cx, ly, it.x + padX + b2.cx, ly + it.lineH}; FillRect(dc, &sr, hb); DeleteObject(hb);
+                }
+            }
+            SetTextColor(dc, cText);
+            if (L.e > L.s) TextOutW(dc, it.x + padX, ly + 1, &it.text[L.s], L.e - L.s);
+        }
         break;
     }
     case K_NOTE:
@@ -402,8 +474,79 @@ Hit* hitAt(int x, int y, Hit& out) {
     return nullptr;
 }
 
+// ----- text selection with the mouse
+int textItemAt(int x, int y) {                                   // y in client coordinates; -1 if none
+    if (y >= g_logRect.bottom) return -1;
+    for (size_t i = 0; i < g_items.size(); i++) {
+        const Item& it = g_items[i];
+        if (it.kind == K_TEXT && x >= it.x && x < it.x + it.w && y + g_scroll >= it.y && y + g_scroll < it.y + it.h) return (int)i;
+    }
+    return -1;
+}
+int nearestTextItem(int y) {
+    int best = -1, bd = 1 << 30;
+    for (size_t i = 0; i < g_items.size(); i++) {
+        const Item& it = g_items[i];
+        if (it.kind != K_TEXT) continue;
+        int top = it.y - g_scroll, bot = top + it.h;
+        int d = y < top ? top - y : y > bot ? y - bot : 0;
+        if (d < bd) { bd = d; best = (int)i; }
+    }
+    return best;
+}
+int charAt(int idx, int x, int y) {
+    const Item& it = g_items[idx];
+    if (it.lines.empty()) return 0;
+    HDC dc = GetDC(g_view); SelectObject(dc, g_f);
+    int padX = it.user ? 16 : 2, padY = it.user ? 10 : 2;
+    int li = std::min<int>((int)it.lines.size() - 1, std::max(0, (y + g_scroll - it.y - padY) / std::max(1, it.lineH)));
+    if (y + g_scroll < it.y) li = 0;
+    const Line L = it.lines[li];
+    int rel = x - it.x - padX, res;
+    int len = L.e - L.s;
+    if (rel <= 0 || len <= 0) res = L.s;
+    else {
+        int fit = 0; SIZE sz;
+        GetTextExtentExPointW(dc, &it.text[L.s], len, rel, &fit, nullptr, &sz);
+        if (fit >= len) res = L.e;
+        else {
+            SIZE a = {0, 0}, b = {0, 0};
+            if (fit > 0) GetTextExtentPoint32W(dc, &it.text[L.s], fit, &a);
+            GetTextExtentPoint32W(dc, &it.text[L.s], fit + 1, &b);
+            res = L.s + fit + ((rel - a.cx) > (b.cx - rel) ? 1 : 0);
+        }
+    }
+    ReleaseDC(g_view, dc);
+    return res;
+}
+void clearSelection() { g_selAi = g_selBi = -1; g_selAc = g_selBc = 0; g_selecting = false; }
+void copySelection() { std::string t = selectedText(); if (!t.empty()) clipboardSetText(g_view, t); }
+void selectAll() {
+    int first = -1, last = -1;
+    for (size_t i = 0; i < g_items.size(); i++) if (g_items[i].kind == K_TEXT) { if (first < 0) first = (int)i; last = (int)i; }
+    if (first < 0) return;
+    g_selAi = first; g_selAc = 0; g_selBi = last; g_selBc = (int)g_items[last].text.size();
+    InvalidateRect(g_view, nullptr, FALSE);
+}
+void contextMenu(int x, int y, POINT screen) {
+    int over = textItemAt(x, y);
+    HMENU m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING | (hasSelection() ? 0 : MF_GRAYED), 1, L"Copy");
+    AppendMenuW(m, MF_STRING | (over >= 0 ? 0 : MF_GRAYED), 2, L"Copy whole message");
+    AppendMenuW(m, MF_STRING, 3, L"Select all");
+    int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, screen.x, screen.y, 0, g_view, nullptr);
+    DestroyMenu(m);
+    if (cmd == 1) copySelection();
+    else if (cmd == 2 && over >= 0) clipboardSetText(g_view, sys::narrow(g_items[over].text));
+    else if (cmd == 3) selectAll();
+}
+
 LRESULT CALLBACK editProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
     if (m == WM_PASTE) { bool handled = false; pasteClipboardPicture(handled); if (handled) return 0; }
+    if (m == WM_KEYDOWN && (wp == 'C' || wp == 'A') && (GetKeyState(VK_CONTROL) & 0x8000) && hasSelection()) {
+        DWORD s = 0, e = 0; SendMessageW(h, EM_GETSEL, (WPARAM)&s, (LPARAM)&e);
+        if (s == e && wp == 'C') { copySelection(); return 0; }                          // nothing selected in the input: copy the chat selection
+    }
     if (m == WM_KEYDOWN && wp == VK_RETURN && !(GetKeyState(VK_SHIFT) & 0x8000)) { doSend(); return 0; }
     if (m == WM_CHAR && wp == VK_RETURN && !(GetKeyState(VK_SHIFT) & 0x8000)) return 0;
     return DefSubclassProc(h, m, wp, lp);
@@ -446,6 +589,11 @@ LRESULT CALLBACK viewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSEMOVE: {
         int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+        if (g_selecting) {
+            int ti = nearestTextItem(y);
+            if (ti >= 0) { g_selBi = ti; g_selBc = charAt(ti, x, y); InvalidateRect(h, nullptr, FALSE); }
+            return 0;
+        }
         Hit hh; Hit* p = hitAt(x, y, hh);
         int hot = p && (p->id == H_PLUS || p->id == H_VOICE) ? p->id : 0;
         if (hot != g_hot) { g_hot = hot; InvalidateRect(h, nullptr, FALSE); }
@@ -457,11 +605,34 @@ LRESULT CALLBACK viewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         POINT pt; GetCursorPos(&pt); ScreenToClient(h, &pt);
         Hit hh;
         if (LOWORD(lp) == HTCLIENT && hitAt(pt.x, pt.y, hh)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
+        if (LOWORD(lp) == HTCLIENT && (g_selecting || textItemAt(pt.x, pt.y) >= 0)) { SetCursor(LoadCursorW(nullptr, IDC_IBEAM)); return TRUE; }
         break;
     }
-    case WM_LBUTTONDOWN: SetFocus(g_edit); return 0;
+    case WM_LBUTTONDOWN: {
+        int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+        int ti = textItemAt(x, y);
+        if (ti >= 0) {
+            g_selecting = true; SetCapture(h);
+            g_selAi = g_selBi = ti; g_selAc = g_selBc = charAt(ti, x, y);
+            g_downPt = {x, y};
+        } else if (hasSelection()) clearSelection();
+        InvalidateRect(h, nullptr, FALSE);
+        SetFocus(g_edit);
+        return 0;
+    }
+    case WM_RBUTTONUP: {
+        POINT pt = {(short)LOWORD(lp), (short)HIWORD(lp)}, sc = pt; ClientToScreen(h, &sc);
+        contextMenu(pt.x, pt.y, sc);
+        return 0;
+    }
     case WM_LBUTTONUP: {
         int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+        if (g_selecting) {
+            g_selecting = false; ReleaseCapture();
+            if (abs(x - g_downPt.x) < 3 && abs(y - g_downPt.y) < 3) clearSelection();
+            InvalidateRect(h, nullptr, FALSE);
+            return 0;
+        }
         Hit hh; Hit* p = hitAt(x, y, hh);
         if (!p) return 0;
         switch (p->id) {
@@ -533,6 +704,7 @@ void chatViewTick() {
     if (!tr.empty()) { auto& l = tr.back(); sig += "|" + std::to_string(l.files.size()) + std::to_string(l.text.size()); }
     if (g_busy) { g_phase = (g_phase + 1) % 3; if (g_live.empty()) InvalidateRect(g_view, nullptr, FALSE); }
     if (sig != g_sig) {
+        if (tr.size() != g_tr.size() && !g_selecting) clearSelection();      // item numbers change when messages are added
         g_sig = sig; g_tr = tr;
         bool atBottom = g_scroll >= g_contentH - (int)g_logRect.bottom - 30;
         layoutAll(atBottom || g_busy);
