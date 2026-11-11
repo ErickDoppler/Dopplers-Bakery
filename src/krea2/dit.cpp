@@ -10,7 +10,7 @@
 #include "gpu/compute.h"
 #include "krea2/safetensors.h"
 
-static const char* P = "model.diffusion_model.";
+static std::string P = "model.diffusion_model.";      // tensor-name prefix; some repacks (e.g. krea2_turbo_fp8) have none
 
 void Krea2DiT::unload() {
     if (buf_) ggml_backend_buffer_free(buf_);
@@ -55,6 +55,7 @@ bool Krea2DiT::load(const std::string& path, int threads, std::string& err, cons
     threads_ = threads > 0 ? threads : 8;
     StFile* st = new StFile(); st_ = st;
     if (!st->open(path, err)) { unload(); return false; }
+    for (const char* pre : {"model.diffusion_model.", "diffusion_model.", ""}) if (st->find(std::string(pre) + "blocks.0.mod.lin")) { P = pre; break; }
     StFile lora; bool useLora = false;
     loraPatched = 0;
     if (!loraPath.empty() && loraStrength != 0.0f) {
@@ -123,7 +124,7 @@ bool Krea2DiT::load(const std::string& path, int threads, std::string& err, cons
                 if (t->dtype == "F8_E4M3") {
                     float scale = 1.0f; st->scalar(j.name.substr(0, j.name.size() - 6) + "weight_scale", scale);
                     st->toFloat(*t, f, scale);
-                    if (useLora) applyLora(lora, j.name, f, j.t->ne[0], j.t->ne[1], loraStrength, loraPatched);
+                    if (useLora) applyLora(lora, "model.diffusion_model." + j.name.substr(P.size()), f, j.t->ne[0], j.t->ne[1], loraStrength, loraPatched);
                     q.resize(ggml_nbytes(j.t));
                     if (j.t->type == GGML_TYPE_F16) ggml_fp32_to_fp16_row(f.data(), (ggml_fp16_t*)q.data(), f.size());
                     else ggml_quantize_chunk(GGML_TYPE_Q8_0, f.data(), q.data(), 0, j.t->ne[1], j.t->ne[0], nullptr);
