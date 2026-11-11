@@ -1,0 +1,7 @@
+build/
+dist/
+third_party/llama.cpp/
+runtime/
+build-static/
+release/
+*.log

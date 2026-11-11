@@ -1,0 +1,7 @@
+#include <winuser.h>
+1 ICON "app.ico"
+1 RT_MANIFEST "app.manifest"
+101 RCDATA "../data/vocab.json"
+102 RCDATA "../data/merges.txt"
+103 RCDATA "../data/tokenizer_config.json"
+104 RCDATA "../data/sa_prompts.json"
