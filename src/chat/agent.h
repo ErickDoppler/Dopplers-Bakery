@@ -40,7 +40,7 @@ public:
 private:
     enum class State { Idle, Thinking, Working, Replying, Speaking };
     struct Call { std::string name; Json args; };
-    struct Pending { int jobId; std::string tool; };
+    struct Pending { int jobId; std::string tool; std::string note; };
 
     std::string registerImage(const std::string& path);           // -> "img3"
     std::string imagePath(const std::string& id);                  // "" if unknown; "last" = newest picture

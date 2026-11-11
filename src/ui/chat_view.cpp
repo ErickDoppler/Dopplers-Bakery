@@ -16,7 +16,7 @@ enum ItemKind { K_TEXT, K_IMAGE, K_AUDIO, K_NOTE, K_TYPING, K_EMPTY };
 enum HitId { H_NONE = 0, H_IMG, H_AUDIO, H_CHIPX, H_PLUS, H_VOICE, H_SEND, H_COPY };
 struct Line { int s, e; };
 struct Item { int kind = K_TEXT; bool user = false; int x = 0, y = 0, w = 0, h = 0; std::wstring text; std::string path; std::vector<Line> lines; int lineH = 0;
-              bool err = false, canCopy = false; int textH = 0; };       // err: red status text; canCopy: small Copy button under a reply
+              bool err = false, info = false, canCopy = false; int textH = 0; };       // err: red status text; canCopy: small Copy button under a reply
 struct Hit { RECT r; int id; int idx; std::string path; };
 struct Thumb { HBITMAP bmp = nullptr; int w = 0, h = 0; };
 
@@ -178,8 +178,8 @@ void buildItems(HDC dc, int W_, int colX, int colW) {
         it.user = user; it.x = user ? colX + colW - it.w : colX; it.y = y; y += it.h; g_items.push_back(it);
     };
     for (auto& m : g_tr) {
-        if (m.role == "note") {
-            Item it; it.kind = K_TEXT; it.err = true; it.text = W(m.text);
+        if (m.role == "note" || m.role == "info") {
+            Item it; it.kind = K_TEXT; it.err = true; it.info = m.role == "info"; it.text = W(m.text);
             int wm = 0; wrapLines(dc, g_fs, it.text, colW, it.lines, wm, it.lineH);
             it.w = wm + 4; it.textH = it.h = (int)it.lines.size() * it.lineH + 4;
             y += 6; add(it, false); continue;
@@ -315,7 +315,7 @@ void paintItem(HDC dc, const Item& it, int yy) {
                     HBRUSH hb = CreateSolidBrush(RGB(176, 204, 250)); RECT sr = {it.x + padX + a.cx, ly, it.x + padX + b2.cx, ly + it.lineH}; FillRect(dc, &sr, hb); DeleteObject(hb);
                 }
             }
-            SetTextColor(dc, it.err ? cErr : cText);
+            SetTextColor(dc, it.info ? cMute : it.err ? cErr : cText);
             if (L.e > L.s) TextOutW(dc, it.x + padX, ly + 1, &it.text[L.s], L.e - L.s);
         }
         if (it.canCopy) {                                   // small "Copy" button under the reply (ChatGPT style)

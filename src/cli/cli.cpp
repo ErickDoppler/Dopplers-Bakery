@@ -141,6 +141,7 @@ int runChatCli(const std::vector<std::string>& a) {
         }
         fflush(stdout);
     }
+    for (auto& j : JobQueue::get().snapshot()) if (j.kind != Kind::LLM) fprintf(stdout, "job %d (%s): %s - %s\n", j.id, kindTitle(j.kind), stateName(j.state), j.status.c_str());
     JobQueue::get().shutdown();
     return 0;
 }

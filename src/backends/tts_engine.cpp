@@ -89,7 +89,7 @@ bool runTTS(const Job& job, JobCtl& ctl, std::string& err) {
 
     const int threads = std::max(4u, std::thread::hardware_concurrency());
     std::string e2;
-    if (!Compute::get().init(threads, e2)) { err = e2; return false; }
+    if (!Compute::get().use(p.str("backend"), threads, e2)) { err = e2; return false; }
     auto t0 = std::chrono::steady_clock::now();
     if (!g.talker.loaded() || g.dir != dir) {
         ctl.progress(0.0f, "loading speech model");

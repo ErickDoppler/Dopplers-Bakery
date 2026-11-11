@@ -19,6 +19,7 @@ header span.sub{color:var(--mut);font-weight:400;font-size:13px}
 .user .bubble{background:var(--bub);border-bottom-right-radius:6px}
 .assistant .bubble{padding-left:2px}
 .note{color:var(--err);font-size:14px;margin:8px 0;user-select:text;white-space:pre-wrap}
+.note.info{color:var(--mut)}
 .copy{margin-top:4px;border:0;background:transparent;color:var(--mut);border-radius:8px;padding:4px 7px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;font:13px inherit}
 .copy:hover{background:var(--panel);color:var(--fg)}.copy.ok{color:var(--acc)}
 .media{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
@@ -100,7 +101,7 @@ function render(s){
  box.innerHTML='';
  if(!s.messages.length&&!s.busy){const e=el('div','empty');e.appendChild(el('h2',null,'What shall we make today?'));e.appendChild(el('div',null,'Describe a picture, a song, a sound effect — or attach a picture and say how to change it.'));box.appendChild(e)}
  s.messages.forEach((m,i)=>{
-  if(m.role==='note'){box.appendChild(el('div','note',m.text));return}
+  if(m.role==='note'||m.role==='info'){box.appendChild(el('div','note'+(m.role==='info'?' info':''),m.text));return}
   const d=el('div','msg '+m.role);
   if(m.text){d.appendChild(el('div','bubble',m.text))}
   const md=media(m.files);if(md)d.appendChild(md);
