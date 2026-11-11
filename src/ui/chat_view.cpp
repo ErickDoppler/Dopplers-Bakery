@@ -13,9 +13,10 @@
 
 namespace {
 enum ItemKind { K_TEXT, K_IMAGE, K_AUDIO, K_NOTE, K_TYPING, K_EMPTY };
-enum HitId { H_NONE = 0, H_IMG, H_AUDIO, H_CHIPX, H_PLUS, H_VOICE, H_SEND };
+enum HitId { H_NONE = 0, H_IMG, H_AUDIO, H_CHIPX, H_PLUS, H_VOICE, H_SEND, H_COPY };
 struct Line { int s, e; };
-struct Item { int kind = K_TEXT; bool user = false; int x = 0, y = 0, w = 0, h = 0; std::wstring text; std::string path; std::vector<Line> lines; int lineH = 0; };
+struct Item { int kind = K_TEXT; bool user = false; int x = 0, y = 0, w = 0, h = 0; std::wstring text; std::string path; std::vector<Line> lines; int lineH = 0;
+              bool err = false, canCopy = false; int textH = 0; };       // err: red status text; canCopy: small Copy button under a reply
 struct Hit { RECT r; int id; int idx; std::string path; };
 struct Thumb { HBITMAP bmp = nullptr; int w = 0, h = 0; };
 
@@ -42,6 +43,8 @@ bool g_tracking = false;
 int g_selAi = -1, g_selAc = 0, g_selBi = -1, g_selBc = 0;
 bool g_selecting = false;
 POINT g_downPt = {};
+int g_copiedIdx = -1, g_hotCopy = -1;           // item whose Copy button shows "Copied" / is under the mouse
+DWORD g_copiedAt = 0;
 
 std::wstring W(const std::string& s) { return sys::widen(s); }
 std::string fileOf(const std::string& p) { return p.substr(p.find_last_of("\\/") + 1); }
@@ -112,6 +115,11 @@ SIZE measure(HDC dc, const std::wstring& t, int maxW, HFONT f) {
     return {r.right, r.bottom};
 }
 
+int padXOf(const Item& it) { return it.err ? 0 : it.user ? 16 : 2; }
+int padYOf(const Item& it) { return it.err ? 2 : it.user ? 10 : 2; }
+HFONT fontOf(const Item& it) { return it.err ? g_fs : g_f; }
+const int kCopyH = 30;
+
 // word-wrap `t` into lines of at most maxW pixels (own wrapping so drawing and hit-testing agree)
 void wrapLines(HDC dc, HFONT f, const std::wstring& t, int maxW, std::vector<Line>& out, int& wMax, int& lineH) {
     HGDIOBJ o = SelectObject(dc, f);
@@ -171,8 +179,9 @@ void buildItems(HDC dc, int W_, int colX, int colW) {
     };
     for (auto& m : g_tr) {
         if (m.role == "note") {
-            Item it; it.kind = K_NOTE; it.text = W(m.text);
-            SIZE s = measure(dc, it.text, colW, g_fs); it.w = s.cx; it.h = s.cy + 4;
+            Item it; it.kind = K_TEXT; it.err = true; it.text = W(m.text);
+            int wm = 0; wrapLines(dc, g_fs, it.text, colW, it.lines, wm, it.lineH);
+            it.w = wm + 4; it.textH = it.h = (int)it.lines.size() * it.lineH + 4;
             y += 6; add(it, false); continue;
         }
         bool user = m.role == "user";
@@ -181,7 +190,9 @@ void buildItems(HDC dc, int W_, int colX, int colW) {
             Item it; it.kind = K_TEXT; it.text = W(m.text);
             int maxW = user ? colW * 78 / 100 : colW, padX = user ? 16 : 2, padY = user ? 10 : 2;
             int wm = 0; wrapLines(dc, g_f, it.text, maxW - 2 * padX, it.lines, wm, it.lineH);
-            it.w = wm + 2 * padX + 2; it.h = (int)it.lines.size() * it.lineH + 2 * padY;
+            it.w = wm + 2 * padX + 2; it.textH = (int)it.lines.size() * it.lineH + 2 * padY;
+            it.canCopy = !user;
+            it.h = it.textH + (it.canCopy ? kCopyH : 0);
             add(it, user);
         }
         for (auto& f : m.files) {
@@ -200,7 +211,7 @@ void buildItems(HDC dc, int W_, int colX, int colW) {
     }
     if (g_busy) {
         y += 14;
-        if (!g_live.empty()) { Item it; it.kind = K_TEXT; it.text = W(g_live); int wm = 0; wrapLines(dc, g_f, it.text, colW - 4, it.lines, wm, it.lineH); it.w = wm + 6; it.h = (int)it.lines.size() * it.lineH + 4; add(it, false); }
+        if (!g_live.empty()) { Item it; it.kind = K_TEXT; it.text = W(g_live); int wm = 0; wrapLines(dc, g_f, it.text, colW - 4, it.lines, wm, it.lineH); it.w = wm + 6; it.textH = it.h = (int)it.lines.size() * it.lineH + 4; add(it, false); }
         else { Item it; it.kind = K_TYPING; it.w = 52; it.h = 28; add(it, false); }
     }
     if (g_tr.empty() && !g_busy) { g_items.clear(); Item it; it.kind = K_EMPTY; it.x = colX; it.w = colW; it.h = 90; it.y = 0; g_items.push_back(it); y = 0; }
@@ -285,9 +296,9 @@ void paintItem(HDC dc, const Item& it, int yy) {
     RECT r = {it.x, yy, it.x + it.w, yy + it.h};
     switch (it.kind) {
     case K_TEXT: {
-        if (it.user) fillRound(dc, r, cUser, cUser, 18);
-        int padX = it.user ? 16 : 2, padY = it.user ? 10 : 2;
-        SelectObject(dc, g_f);
+        if (it.user) { RECT br = {r.left, r.top, r.right, r.top + it.textH}; fillRound(dc, br, cUser, cUser, 18); }
+        int padX = padXOf(it), padY = padYOf(it);
+        SelectObject(dc, fontOf(it));
         int idx = (int)(&it - &g_items[0]);
         int ai = 0, ac = 0, bi = 0, bc = 0; bool sel = hasSelection();
         if (sel) selRange(ai, ac, bi, bc);
@@ -304,15 +315,23 @@ void paintItem(HDC dc, const Item& it, int yy) {
                     HBRUSH hb = CreateSolidBrush(RGB(176, 204, 250)); RECT sr = {it.x + padX + a.cx, ly, it.x + padX + b2.cx, ly + it.lineH}; FillRect(dc, &sr, hb); DeleteObject(hb);
                 }
             }
-            SetTextColor(dc, cText);
+            SetTextColor(dc, it.err ? cErr : cText);
             if (L.e > L.s) TextOutW(dc, it.x + padX, ly + 1, &it.text[L.s], L.e - L.s);
+        }
+        if (it.canCopy) {                                   // small "Copy" button under the reply (ChatGPT style)
+            bool done = g_copiedIdx == idx;
+            RECT cb = {it.x, yy + it.textH + 2, it.x + (done ? 84 : 28), yy + it.textH + 2 + 26};
+            if (g_hotCopy == idx && !done) fillRound(dc, cb, cHot, cHot, 8);
+            int cx = cb.left + 14, cy = (cb.top + cb.bottom) / 2;
+            HPEN pn = CreatePen(PS_SOLID, 2, done ? cAcc : cMute); HGDIOBJ op = SelectObject(dc, pn), ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+            if (done) { MoveToEx(dc, cx - 6, cy, nullptr); LineTo(dc, cx - 2, cy + 4); LineTo(dc, cx + 6, cy - 5); }
+            else { RoundRect(dc, cx - 4, cy - 7, cx + 7, cy + 5, 3, 3); RoundRect(dc, cx - 8, cy - 3, cx + 3, cy + 9, 3, 3); }
+            SelectObject(dc, op); SelectObject(dc, ob); DeleteObject(pn);
+            if (done) { SetTextColor(dc, cAcc); SelectObject(dc, g_fs); RECT tr = {cx + 12, cb.top, cb.right, cb.bottom}; DrawTextW(dc, L"Copied", -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX); }
         }
         break;
     }
-    case K_NOTE:
-        SetTextColor(dc, cErr); SelectObject(dc, g_fs);
-        DrawTextW(dc, it.text.c_str(), -1, &r, DT_WORDBREAK | DT_NOPREFIX);
-        break;
+    case K_NOTE: break;
     case K_IMAGE: {
         const Thumb& t = thumbOf(it.path, 360);
         drawThumb(dc, t, it.x, yy, it.w, it.h, 0, 0, t.w ? t.w : 1, t.h ? t.h : 1, 14);
@@ -465,6 +484,10 @@ Hit* hitAt(int x, int y, Hit& out) {
     if (y < g_logRect.bottom) {
         for (size_t i = 0; i < g_items.size(); i++) {
             auto& it = g_items[i];
+            if (it.kind == K_TEXT && it.canCopy && x >= it.x && x < it.x + 84 && y + g_scroll >= it.y + it.textH + 2 && y + g_scroll < it.y + it.textH + 28) {
+                out = {{it.x, it.y + it.textH, it.x + 28, it.y + it.h}, H_COPY, (int)i, ""};
+                return &out;
+            }
             if ((it.kind == K_IMAGE || it.kind == K_AUDIO) && x >= it.x && x < it.x + it.w && y + g_scroll >= it.y && y + g_scroll < it.y + it.h) {
                 out = {{it.x, it.y, it.x + it.w, it.y + it.h}, it.kind == K_IMAGE ? H_IMG : H_AUDIO, (int)i, it.path};
                 return &out;
@@ -479,7 +502,7 @@ int textItemAt(int x, int y) {                                   // y in client 
     if (y >= g_logRect.bottom) return -1;
     for (size_t i = 0; i < g_items.size(); i++) {
         const Item& it = g_items[i];
-        if (it.kind == K_TEXT && x >= it.x && x < it.x + it.w && y + g_scroll >= it.y && y + g_scroll < it.y + it.h) return (int)i;
+        if (it.kind == K_TEXT && x >= it.x && x < it.x + it.w && y + g_scroll >= it.y && y + g_scroll < it.y + it.textH) return (int)i;
     }
     return -1;
 }
@@ -488,7 +511,7 @@ int nearestTextItem(int y) {
     for (size_t i = 0; i < g_items.size(); i++) {
         const Item& it = g_items[i];
         if (it.kind != K_TEXT) continue;
-        int top = it.y - g_scroll, bot = top + it.h;
+        int top = it.y - g_scroll, bot = top + it.textH;
         int d = y < top ? top - y : y > bot ? y - bot : 0;
         if (d < bd) { bd = d; best = (int)i; }
     }
@@ -497,8 +520,8 @@ int nearestTextItem(int y) {
 int charAt(int idx, int x, int y) {
     const Item& it = g_items[idx];
     if (it.lines.empty()) return 0;
-    HDC dc = GetDC(g_view); SelectObject(dc, g_f);
-    int padX = it.user ? 16 : 2, padY = it.user ? 10 : 2;
+    HDC dc = GetDC(g_view); SelectObject(dc, fontOf(it));
+    int padX = padXOf(it), padY = padYOf(it);
     int li = std::min<int>((int)it.lines.size() - 1, std::max(0, (y + g_scroll - it.y - padY) / std::max(1, it.lineH)));
     if (y + g_scroll < it.y) li = 0;
     const Line L = it.lines[li];
@@ -596,11 +619,12 @@ LRESULT CALLBACK viewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
         Hit hh; Hit* p = hitAt(x, y, hh);
         int hot = p && (p->id == H_PLUS || p->id == H_VOICE) ? p->id : 0;
-        if (hot != g_hot) { g_hot = hot; InvalidateRect(h, nullptr, FALSE); }
+        int hotCopy = p && p->id == H_COPY ? p->idx : -1;
+        if (hot != g_hot || hotCopy != g_hotCopy) { g_hot = hot; g_hotCopy = hotCopy; InvalidateRect(h, nullptr, FALSE); }
         if (!g_tracking) { TRACKMOUSEEVENT t = {sizeof t, TME_LEAVE, h, 0}; TrackMouseEvent(&t); g_tracking = true; }
         return 0;
     }
-    case WM_MOUSELEAVE: g_tracking = false; if (g_hot) { g_hot = 0; InvalidateRect(h, nullptr, FALSE); } return 0;
+    case WM_MOUSELEAVE: g_tracking = false; if (g_hot || g_hotCopy >= 0) { g_hot = 0; g_hotCopy = -1; InvalidateRect(h, nullptr, FALSE); } return 0;
     case WM_SETCURSOR: {
         POINT pt; GetCursorPos(&pt); ScreenToClient(h, &pt);
         Hit hh;
@@ -642,6 +666,12 @@ LRESULT CALLBACK viewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         case H_CHIPX: if (p->idx < (int)g_attached.size()) { g_attached.erase(g_attached.begin() + p->idx); layoutAll(false); } break;
         case H_IMG: ShellExecuteW(h, L"open", W(p->path).c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
         case H_AUDIO: playSound(p->path); InvalidateRect(h, nullptr, FALSE); break;
+        case H_COPY:
+            if (p->idx >= 0 && p->idx < (int)g_items.size()) {
+                clipboardSetText(h, sys::narrow(g_items[p->idx].text));
+                g_copiedIdx = p->idx; g_copiedAt = GetTickCount(); InvalidateRect(h, nullptr, FALSE);
+            }
+            break;
         }
         SetFocus(g_edit);
         return 0;
@@ -698,6 +728,7 @@ void chatViewTick() {
     std::string snd = ag.takeSpeechToPlay();
     if (!snd.empty() && ag.settings.voice && !WebServer::get().clientActive()) playSound(snd);      // the browser plays it when one is open
     checkSoundEnded();
+    if (g_copiedIdx >= 0 && GetTickCount() - g_copiedAt > 1600) { g_copiedIdx = -1; InvalidateRect(g_view, nullptr, FALSE); }
     g_busy = ag.busy(); g_status = g_busy ? ag.status() : ""; g_live = ag.live();
     auto tr = ag.transcript();
     std::string sig = std::to_string(tr.size()) + "|" + std::to_string(g_live.size()) + "|" + (g_busy ? "b" : "i") + g_status;

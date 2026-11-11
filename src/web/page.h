@@ -18,7 +18,9 @@ header span.sub{color:var(--mut);font-weight:400;font-size:13px}
 .bubble{max-width:88%;white-space:pre-wrap;word-wrap:break-word;padding:10px 14px;border-radius:18px}
 .user .bubble{background:var(--bub);border-bottom-right-radius:6px}
 .assistant .bubble{padding-left:2px}
-.note{color:var(--err);font-size:14px;margin:8px 0}
+.note{color:var(--err);font-size:14px;margin:8px 0;user-select:text;white-space:pre-wrap}
+.copy{margin-top:4px;border:0;background:transparent;color:var(--mut);border-radius:8px;padding:4px 7px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;font:13px inherit}
+.copy:hover{background:var(--panel);color:var(--fg)}.copy.ok{color:var(--acc)}
 .media{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
 .media img{max-width:min(420px,100%);max-height:420px;border-radius:14px;display:block;cursor:zoom-in;box-shadow:var(--shadow)}
 .user .media{justify-content:flex-end}
@@ -80,6 +82,11 @@ const $=id=>document.getElementById(id);
 const H={'X-Bakery':'1'};
 let st=null,attached=[],busy=false,seen=-1,lastSig='';const played=new Set();
 const post=(u,b)=>fetch(u,{method:'POST',headers:{...H,'Content-Type':'application/json'},body:JSON.stringify(b||{})}).then(r=>r.json());
+const COPY_SVG='<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
+const OK_SVG='<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
+async function copyText(t,btn){
+ try{await navigator.clipboard.writeText(t)}catch(e){const a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();try{document.execCommand('copy')}catch(_){}a.remove()}
+ btn.innerHTML=OK_SVG+' Copied';btn.classList.add('ok');setTimeout(()=>{btn.innerHTML=COPY_SVG;btn.classList.remove('ok')},1500)}
 function el(t,c,txt){const e=document.createElement(t);if(c)e.className=c;if(txt!=null)e.textContent=txt;return e}
 function media(files){
  if(!files||!files.length)return null;const m=el('div','media');
@@ -96,7 +103,9 @@ function render(s){
   if(m.role==='note'){box.appendChild(el('div','note',m.text));return}
   const d=el('div','msg '+m.role);
   if(m.text){d.appendChild(el('div','bubble',m.text))}
-  const md=media(m.files);if(md)d.appendChild(md);box.appendChild(d);
+  const md=media(m.files);if(md)d.appendChild(md);
+  if(m.text&&m.role==='assistant'){const cb=el('button','copy');cb.title='Copy';cb.innerHTML=COPY_SVG;cb.onclick=()=>copyText(m.text,cb);d.appendChild(cb)}
+  box.appendChild(d);
   // voice replies play in the browser once, when they first appear
   if(m.role==='assistant'){d.querySelectorAll('audio[data-auto]').forEach(a=>{const u=a.getAttribute('src');if(!played.has(u)){played.add(u);if(seen>=0&&s.voice)a.play().catch(()=>{})}})}
  });
