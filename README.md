@@ -30,7 +30,7 @@ The app reads **three kinds of model files**: `.gguf` (language model), `.safete
 
 | Feature (tab) | Role | File | Type | Size | Where it goes | Download |
 |---|---|---|---|---|---|---|
-| Chat / LLM | language model | `Qwen3-4B-Instruct-2507-Q4_K_M.gguf` | `.gguf` | 2.5 GB | `models\LLM\` | [link](https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf) |
+| Chat / LLM | language model (abliterated: the community removed the refusals) | `Huihui-Qwen3-4B-Instruct-2507-abliterated.Q4_K_M.gguf` | `.gguf` | 2.5 GB | `modelslm` | [link](https://huggingface.co/mradermacher/huihui-qwen3-4b-instruct-2507-abliterated-gguf/resolve/main/huihui-qwen3-4b-instruct-2507-abliterated.q4_k_m.gguf) |
 | Speech (TTS) | model folder | `Qwen3-TTS-12Hz-1.7B-CustomVoice` (whole repo, incl. `speech_tokenizer\`) | folder: `model.safetensors` 3.8 GB, `speech_tokenizer\model.safetensors` 0.7 GB, `config.json`, `generation_config.json`, `merges.txt`, `vocab.json`, `tokenizer_config.json`, `preprocessor_config.json` | 4.5 GB | `models\qwen-tts\Qwen3-TTS-12Hz-1.7B-CustomVoice\` | [repo](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) |
 | Images | diffusion model | `krea2_turbo_fp8.safetensors` | `.safetensors` | 12.9 GB | `models\diffusion_models\` | [link](https://huggingface.co/AlperKTS/Krea2_FP8/resolve/main/krea2_turbo_fp8.safetensors) |
 | Images | text encoder | `qwen3vl_4b_fp8_scaled.safetensors` | `.safetensors` | 5.2 GB | `models\text_encoders\` | [link](https://huggingface.co/AlperKTS/Krea2_FP8/resolve/main/qwen3vl_4b_fp8_scaled.safetensors) |
@@ -40,6 +40,7 @@ The app reads **three kinds of model files**: `.gguf` (language model), `.safete
 | **Total** | | | | **≈ 35.8 GB** | | |
 
 Optional:
+- The standard, safety-tuned Qwen model instead of the abliterated one: [`Qwen3-4B-Instruct-2507-Q4_K_M.gguf`](https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf) (2.5 GB). It declines some requests; any other `.gguf` chat model also works (pick it in the LLM tab). Models are third-party: check each licence and use them responsibly.
 - Voice cloning in the TTS tab: [`Qwen/Qwen3-TTS-12Hz-1.7B-Base`](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) (another model folder, similar size) in `models\qwen-tts\`.
 - LoRA for images (`.safetensors`) and for the LLM (`.gguf`); the audio prompt enhancer uses the LLM tab's `.gguf`.
 - Other builds of the same models work if they have the same tensor layout; use **Models > Add models folder** to point at an existing ComfyUI `models` folder.

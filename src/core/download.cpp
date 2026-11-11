@@ -20,9 +20,9 @@ static CatEntry one(const char* id, const char* label, Kind k, const char* url, 
 std::vector<CatEntry> loadCatalog() {
     std::vector<CatEntry> c;
     // LLM (Qwen)
-    c.push_back(one("llm-qwen3-4b", "Qwen3 4B Instruct 2507 (Q4_K_M)", Kind::LLM,
-        "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
-        "LLM/Qwen3-4B-Instruct-2507-Q4_K_M.gguf", 2497281120ull));
+    c.push_back(one("llm-qwen3-4b", "Qwen3 4B Instruct 2507 abliterated, no refusals (Q4_K_M)", Kind::LLM,
+        "https://huggingface.co/mradermacher/Huihui-Qwen3-4B-Instruct-2507-abliterated-GGUF/resolve/main/Huihui-Qwen3-4B-Instruct-2507-abliterated.Q4_K_M.gguf",
+        "LLM/Huihui-Qwen3-4B-Instruct-2507-abliterated.Q4_K_M.gguf", 2497281312ull));
     // TTS (Qwen3-TTS, same models the ComfyUI qwen3-tts node uses)
     c.push_back(hf("tts-qwen3-custom", "Qwen3-TTS 12Hz 1.7B CustomVoice", Kind::TTS,
         "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", "qwen-tts/Qwen3-TTS-12Hz-1.7B-CustomVoice", 4516000000ull));
