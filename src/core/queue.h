@@ -24,6 +24,7 @@ struct Job {
     std::vector<std::string> outputs;  // files written
     std::string text;                  // text result (LLM)
     std::string error;
+    std::string info;                  // short facts for the queue list: "12.3 tok/s", "720x720", "20.0 s"
     double tStart = 0, tEnd = 0;
 };
 
@@ -34,6 +35,7 @@ public:
     virtual void progress(float frac, const std::string& status) = 0;
     virtual void addOutput(const std::string& path) = 0;
     virtual void setText(const std::string& t) = 0;
+    virtual void info(const std::string&) {}          // shown in the queue list (tokens/s, image size, audio length)
     // Call between steps: blocks while paused; returns false when cancelled (stop at once).
     virtual bool checkpoint() = 0;
 };

@@ -1,5 +1,6 @@
 // LLM text generation on the embedded llama.cpp/ggml runtime (CPU).
 #include <algorithm>
+#include <chrono>
 #include <random>
 #include <thread>
 #include "backends/engines.h"
@@ -127,6 +128,8 @@ bool runLLM(const Job& job, JobCtl& ctl, std::string& err) {
     std::string out;
     int gen = 0;
     llama_token tok = 0;
+    const auto tGen = std::chrono::steady_clock::now();
+    auto rate = [&]() { double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - tGen).count(); if (s > 0.2 && gen > 0) { char b[32]; snprintf(b, sizeof b, "%.1f tok/s", gen / s); ctl.info(b); } };
     for (; gen < maxNew; gen++) {
         if (!ctl.checkpoint()) { err = "cancelled"; return false; }
         tok = llama_sampler_sample(smpl, ctx, -1);
@@ -134,9 +137,10 @@ bool runLLM(const Job& job, JobCtl& ctl, std::string& err) {
         char piece[256];
         int n = llama_token_to_piece(vocab, tok, piece, sizeof piece, 0, false);
         if (n > 0) out.append(piece, n);
-        if (gen % 6 == 0) { ctl.setText(stripThink(out)); ctl.progress((float)gen / maxNew, std::to_string(gen) + " / " + std::to_string(maxNew) + " tokens"); }
+        if (gen % 6 == 0) { rate(); ctl.setText(stripThink(out)); ctl.progress((float)gen / maxNew, std::to_string(gen) + " / " + std::to_string(maxNew) + " tokens"); }
         if (llama_decode(ctx, llama_batch_get_one(&tok, 1)) != 0) { err = "decode failed during generation"; return false; }
     }
+    rate();
     out = stripThink(out);
     while (!out.empty() && (out.back() == '\n' || out.back() == ' ')) out.pop_back();
     size_t lead = out.find_first_not_of("\n ");

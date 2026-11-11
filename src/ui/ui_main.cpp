@@ -6,6 +6,7 @@
 #include <shellapi.h>
 #include <mmsystem.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include "ui/chat_view.h"
 #include "web/server.h"
@@ -23,7 +24,7 @@ namespace {
 enum {
     IDC_CREATE = 1001, IDC_SETTINGS, IDC_OUTLIST, IDC_PREVIEW, IDC_COPY, IDC_DELETE,
     IDC_FIELD0 = 2000, IDC_BROWSE0 = 2500,
-    IDC_QLIST = 3001, IDC_QUP, IDC_QDOWN, IDC_QREMOVE, IDC_QPAUSE, IDC_QCANCEL, IDC_QCLEAR, IDC_QDETAILS, IDC_QPROG, IDC_QSTAT, IDC_QTOGGLE,
+    IDC_QLIST = 3001, IDC_QUP, IDC_QDOWN, IDC_QREMOVE, IDC_QPAUSE, IDC_QCANCEL, IDC_QCLEAR, IDC_QDETAILS, IDC_QPROG, IDC_QSTAT, IDC_QTOGGLE, IDC_QDETAIL,
 
     IDM_OPENOUT = 4001, IDM_EXIT, IDM_DOWNLOAD, IDM_ADDROOT, IDM_ABOUT, IDM_WEB, IDM_WEBLAN, IDM_QUEUE,
 };
@@ -48,7 +49,7 @@ struct Page {
     std::string sig;
 };
 
-HWND g_main, g_tab, g_qTitle, g_qList, g_qStat, g_qProg, g_qToggle = nullptr;
+HWND g_main, g_tab, g_qTitle, g_qList, g_qStat, g_qProg, g_qToggle = nullptr, g_qDetail = nullptr;
 HWND g_qBtn[8];
 Page g_pages[kKindCount];
 std::vector<int> g_qIds;          // job id per queue row
@@ -410,33 +411,116 @@ void buildPage(Page& p, Kind kind) {
 }
 
 // ----------------------------------------------------------------- queue panel
-std::string pct(const Job& j) { return j.state == JobState::Running || j.state == JobState::Paused ? std::to_string((int)(j.progress * 100)) + "%" : ""; }
+std::string fmtTime(double s) {
+    char b[32];
+    if (s < 60) snprintf(b, sizeof b, "%.1f s", s);
+    else if (s < 3600) snprintf(b, sizeof b, "%d:%02d", (int)s / 60, (int)s % 60);
+    else snprintf(b, sizeof b, "%d:%02d:%02d", (int)s / 3600, (int)s % 3600 / 60, (int)s % 60);
+    return b;
+}
+// "37%" while running, otherwise the outcome
+std::string progressText(const Job& j) {
+    switch (j.state) {
+    case JobState::Running: return std::to_string((int)(j.progress * 100)) + "%";
+    case JobState::Paused: return std::to_string((int)(j.progress * 100)) + "% paused";
+    case JobState::Queued: return "Queued";
+    case JobState::Held: return "Held";
+    case JobState::Done: return "Done";
+    case JobState::Failed: return "Failed";
+    default: return "Canceled";
+    }
+}
+// tokens/s (LLM), image size, audio length - whatever applies to the job
+std::string infoText(const Job& j) {
+    if (!j.info.empty()) return j.info;
+    if (j.kind == Kind::Image && j.params.has("width")) return std::to_string(j.params.integer("width", 0)) + "x" + std::to_string(j.params.integer("height", 0));
+    if (j.kind == Kind::Audio && j.params.has("length")) return std::to_string(j.params.integer("length", 0)) + " s";
+    return "";
+}
+std::string timeText(const Job& j) {
+    if (j.state == JobState::Running || j.state == JobState::Paused) return j.tStart > 0 ? fmtTime(sys::now() - j.tStart) : "";
+    if (j.state == JobState::Done || j.state == JobState::Failed || j.state == JobState::Canceled) return j.tStart > 0 && j.tEnd >= j.tStart ? fmtTime(j.tEnd - j.tStart) : "";
+    return "";
+}
 
 int selectedJob() {
     int s = ListView_GetNextItem(g_qList, -1, LVNI_SELECTED);
     return s >= 0 && s < (int)g_qIds.size() ? g_qIds[s] : 0;
 }
 
+std::string crlf(const std::string& s) { std::string r; for (char c : s) { if (c == '\n' && (r.empty() || r.back() != '\r')) r += '\r'; r += c; } return r; }
+std::string baseName(const std::string& p) { return p.substr(p.find_last_of("\\/") + 1); }
+
+// everything about a job: prompt first, then outcome, then the settings it ran with
+std::string jobDetails(const Job& j) {
+    std::string s = "Job " + std::to_string(j.id) + " - " + kindTitle(j.kind) + " - " + progressText(j) + "\n";
+    std::string meta;
+    if (!timeText(j).empty()) meta += "Time: " + timeText(j) + "   ";
+    if (!infoText(j).empty()) meta += (j.kind == Kind::LLM ? "Speed: " : j.kind == Kind::Image ? "Size: " : "Length: ") + infoText(j);
+    if (!meta.empty()) s += meta + "\n";
+    if (!j.status.empty() && j.state != JobState::Done) s += "Status: " + j.status + "\n";
+    if (!j.error.empty()) s += "Error: " + j.error + "\n";
+    std::string prompt = j.kind == Kind::TTS ? j.params.str("text") : j.params.str("prompt");
+    if (j.params.has("pre_prompt") && !j.params.str("pre_prompt").empty()) prompt = j.params.str("pre_prompt") + "\n" + prompt;
+    if (prompt.empty() && j.params.get("messages").t == Json::Arr && !j.params.get("messages").a.empty()) {
+        s += "\nConversation (last message):\n" + j.params.get("messages").a.back().str("content") + "\n";
+    } else if (!prompt.empty()) s += "\nPrompt:\n" + prompt + "\n";
+    if (!j.params.str("negative").empty()) s += "\nNegative prompt:\n" + j.params.str("negative") + "\n";
+    if (!j.text.empty() && j.kind == Kind::LLM) s += "\nResult:\n" + j.text + "\n";
+    else if (!j.text.empty() && j.kind == Kind::Audio) s += "\nExpanded prompt used:\n" + j.text + "\n";
+    if (!j.outputs.empty()) { s += "\nFiles:\n"; for (auto& o : j.outputs) s += o + "\n"; }
+    std::string st;
+    for (auto& kv : j.params.o) {
+        const std::string& k = kv.first; const Json& v = kv.second;
+        if (k == "prompt" || k == "text" || k == "negative" || k == "pre_prompt" || k == "messages" || k == "system" || k == "no_output") continue;
+        if (v.t == Json::Str) { if (v.s.empty()) continue; st += "  " + k + ": " + ((k == "model" || k == "clip" || k == "vae" || k == "lora" || k == "llm" || k == "init_image" || k == "ref_audio") ? baseName(v.s) : v.s) + "\n"; }
+        else if (v.t == Json::Num || v.t == Json::Bool) st += "  " + k + ": " + v.dump() + "\n";
+    }
+    if (!st.empty()) s += "\nSettings:\n" + st;
+    return crlf(s);
+}
+
+std::vector<std::array<std::string, 3>> g_qCache;     // text of columns 2..4 per row, so the list is touched only when something changed
+std::string g_qDetailText;
+
+void refreshDetails() {
+    std::string t;
+    Job sel;
+    if (int id = selectedJob()) { if (JobQueue::get().find(id, sel)) t = jobDetails(sel); }
+    else t = "Click a job to see its prompt and details.";
+    if (t == g_qDetailText) return;
+    g_qDetailText = t;
+    int first = (int)SendMessageW(g_qDetail, EM_GETFIRSTVISIBLELINE, 0, 0);
+    uiSetText(g_qDetail, t);
+    SendMessageW(g_qDetail, EM_LINESCROLL, 0, first);        // keep the reading position while a running job updates
+}
+
 void refreshQueue() {
     auto jobs = JobQueue::get().snapshot();
     std::string sig;
-    for (auto& j : jobs) sig += std::to_string(j.id) + stateName(j.state) + pct(j) + ";";
-    if (sig != g_qSig) {
+    for (auto& j : jobs) sig += std::to_string(j.id) + stateName(j.state) + ";";
+    if (sig != g_qSig) {                                     // rows added, removed, reordered or changed state: rebuild
         g_qSig = sig;
         int keep = selectedJob();
         ListView_DeleteAllItems(g_qList);
-        g_qIds.clear();
+        g_qIds.clear(); g_qCache.clear();
         int row = 0;
         for (auto& j : jobs) {
             LVITEMW it = {}; it.mask = LVIF_TEXT; it.iItem = row;
             std::wstring a = sys::widen(std::to_string(j.id)); it.pszText = &a[0];
             ListView_InsertItem(g_qList, &it);
-            std::wstring b = sys::widen(kindTitle(j.kind)), c = sys::widen(j.title), d = sys::widen(std::string(stateName(j.state)) + (j.state == JobState::Failed ? "!" : "")), e = sys::widen(pct(j));
-            ListView_SetItemText(g_qList, row, 1, &b[0]); ListView_SetItemText(g_qList, row, 2, &c[0]);
-            ListView_SetItemText(g_qList, row, 3, &d[0]); ListView_SetItemText(g_qList, row, 4, &e[0]);
-            g_qIds.push_back(j.id);
+            std::wstring b = sys::widen(kindTitle(j.kind));
+            ListView_SetItemText(g_qList, row, 1, &b[0]);
+            g_qIds.push_back(j.id); g_qCache.push_back({"\x01", "\x01", "\x01"});
             if (j.id == keep) ListView_SetItemState(g_qList, row, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
             row++;
+        }
+    }
+    for (size_t row = 0; row < jobs.size() && row < g_qCache.size(); row++) {       // live cells: progress, info, time
+        std::array<std::string, 3> now = {progressText(jobs[row]), infoText(jobs[row]), timeText(jobs[row])};
+        for (int c = 0; c < 3; c++) if (now[c] != g_qCache[row][c]) {
+            g_qCache[row][c] = now[c];
+            std::wstring w = sys::widen(now[c]); ListView_SetItemText(g_qList, (int)row, 2 + c, &w[0]);
         }
     }
     // status line for the active job
@@ -451,17 +535,8 @@ void refreshQueue() {
     Job sel; std::string cap = "Pause";
     if (int id = selectedJob()) if (JobQueue::get().find(id, sel) && (sel.state == JobState::Paused || sel.state == JobState::Held)) cap = "Resume";
     if (uiText(g_qBtn[3]) != cap) uiSetText(g_qBtn[3], cap);
+    refreshDetails();
     for (auto& p : g_pages) refreshOutputs(p);
-}
-
-std::string jobDetails(const Job& j) {
-    std::string s = "Job " + std::to_string(j.id) + " - " + kindTitle(j.kind) + "\r\nState: " + stateName(j.state) + "\r\n";
-    if (!j.status.empty()) s += "Status: " + j.status + "\r\n";
-    if (!j.error.empty()) s += "Error: " + j.error + "\r\n";
-    for (auto& o : j.outputs) s += "Output: " + o + "\r\n";
-    s += "\r\nParameters:\r\n" + j.params.dump(2);
-    std::string r; for (char c : s) { if (c == '\n' && (r.empty() || r.back() != '\r')) r += '\r'; r += c; }
-    return r;
 }
 
 void onQueueCommand(int id) {
@@ -491,11 +566,12 @@ void buildQueue() {
     g_qTitle = uiMake(g_main, L"STATIC", "Queue", SS_LEFT);
     g_qList = uiMake(g_main, WC_LISTVIEWW, "", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_TABSTOP, IDC_QLIST, WS_EX_CLIENTEDGE);
     ListView_SetExtendedListViewStyle(g_qList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
-    const wchar_t* cols[] = {L"#", L"Tab", L"Prompt", L"State", L"%"}; int cw[] = {30, 70, 150, 70, 40};
+    const wchar_t* cols[] = {L"#", L"Tab", L"Progress", L"Speed / size / length", L"Time"}; int cw[] = {34, 90, 90, 130, 70};
     for (int i = 0; i < 5; i++) { LVCOLUMNW c = {}; c.mask = LVCF_TEXT | LVCF_WIDTH; c.pszText = (LPWSTR)cols[i]; c.cx = cw[i]; ListView_InsertColumn(g_qList, i, &c); }
     const char* names[] = {"Move up", "Move down", "Remove", "Pause", "Cancel", "Clear finished", "Details...", ""};
     int ids[] = {IDC_QUP, IDC_QDOWN, IDC_QREMOVE, IDC_QPAUSE, IDC_QCANCEL, IDC_QCLEAR, IDC_QDETAILS, 0};
     for (int i = 0; i < 7; i++) g_qBtn[i] = uiMake(g_main, L"BUTTON", names[i], BS_PUSHBUTTON | WS_TABSTOP, ids[i]);
+    g_qDetail = uiMake(g_main, L"EDIT", "Click a job to see its prompt and details.", ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL, IDC_QDETAIL, WS_EX_CLIENTEDGE);
     g_qStat = uiMake(g_main, L"STATIC", "Idle", SS_LEFT | SS_ENDELLIPSIS);
     g_qProg = uiMake(g_main, PROGRESS_CLASSW, "", PBS_SMOOTH, IDC_QPROG);
     SendMessageW(g_qProg, PBM_SETRANGE32, 0, 1000);
@@ -521,13 +597,13 @@ RECT splitterRect() {
 void saveQueueUi() {
     Settings& s = Settings::get();
     s.setUiInt("queue_visible", g_qVis ? 1 : 0); s.setUiInt("queue_width", g_qW);
-    if (g_qColsCustom) for (int i = 0; i < 5; i++) s.setUiInt("qcol" + std::to_string(i), ListView_GetColumnWidth(g_qList, i));
+    if (g_qColsCustom) for (int i = 0; i < 5; i++) s.setUiInt("qc2_" + std::to_string(i), ListView_GetColumnWidth(g_qList, i));
 }
 void loadQueueUi() {
     Settings& s = Settings::get();
     g_qVis = s.uiInt("queue_visible", 1) != 0; g_qW = s.uiInt("queue_width", 0);
-    if (s.uiInt("qcol0", 0) > 0) {
-        for (int i = 0; i < 5; i++) { int w = s.uiInt("qcol" + std::to_string(i), 0); if (w > 0) ListView_SetColumnWidth(g_qList, i, w); }
+    if (s.uiInt("qc2_0", 0) > 0) {
+        for (int i = 0; i < 5; i++) { int w = s.uiInt("qc2_" + std::to_string(i), 0); if (w > 0) ListView_SetColumnWidth(g_qList, i, w); }
         g_qColsCustom = true;
     }
 }
@@ -542,7 +618,7 @@ void layoutMain() {
     int W = rc.right, H = rc.bottom;
     int qW = queueWidth(W);
     int tabW = g_qVis ? W - qW - kSplit : W - kToggleW - 2;
-    for (HWND c : {g_qTitle, g_qList, g_qStat, g_qProg}) ShowWindow(c, g_qVis ? SW_SHOW : SW_HIDE);
+    for (HWND c : {g_qTitle, g_qList, g_qDetail, g_qStat, g_qProg}) ShowWindow(c, g_qVis ? SW_SHOW : SW_HIDE);
     for (int i = 0; i < 7; i++) ShowWindow(g_qBtn[i], g_qVis ? SW_SHOW : SW_HIDE);
     uiPlace(g_tab, 4, 4, tabW - 4, H - 8);
     RECT tr = {4, 4, 4 + tabW - 4, 4 + H - 8};
@@ -555,12 +631,14 @@ void layoutMain() {
     if (!g_qVis) return;
     uiPlace(g_qTitle, x, 6, w - 62, 18);
     int listH = H - 6 - 22 - 22 - 66 - 28 - 30;
-    uiPlace(g_qList, x, 26, w, listH);
+    int detailH = std::min(190, std::max(90, listH / 3)), listH2 = listH - detailH - 6;
+    uiPlace(g_qList, x, 26, w, listH2);
+    uiPlace(g_qDetail, x, 26 + listH2 + 6, w, detailH);
     int bw = (w - 8) / 3, y = 26 + listH + 6;
     for (int i = 0; i < 7; i++) { int r = i / 3, c = i % 3; uiPlace(g_qBtn[i], x + c * (bw + 4), y + r * 30, bw, 26); }
     uiPlace(g_qStat, x, H - 46, w, 18);
     uiPlace(g_qProg, x, H - 24, w, 16);
-    if (!g_qColsCustom) ListView_SetColumnWidth(g_qList, 2, std::max(80, w - 30 - 70 - 70 - 40 - 24));
+
 }
 
 void showSelectedPage() {

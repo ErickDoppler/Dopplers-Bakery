@@ -113,6 +113,10 @@ public:
         std::lock_guard<std::mutex> g(q_.m_);
         int i = indexOf(q_.jobs_, id_); if (i >= 0) q_.jobs_[i].text = t;
     }
+    void info(const std::string& s) override {
+        std::lock_guard<std::mutex> g(q_.m_);
+        int i = indexOf(q_.jobs_, id_); if (i >= 0) q_.jobs_[i].info = s;
+    }
     bool checkpoint() override {
         std::unique_lock<std::mutex> lk(q_.m_);
         for (;;) {

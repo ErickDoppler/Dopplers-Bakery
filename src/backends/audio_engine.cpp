@@ -91,6 +91,7 @@ bool runAudio(const Job& job, JobCtl& ctl, std::string& err) {
     prompt = prompt.substr(a, prompt.find_last_not_of(" \r\n\t") - a + 1);
 
     const double seconds = std::min(std::max(p.num("length", 60), 1.0), 380.0);
+    { char b[32]; snprintf(b, sizeof b, "%.0f s", seconds); ctl.info(b); }
     const int T = std::max(2, (int)std::lround(seconds * SaVae::kSampleRate / SaVae::kSamplesPerLatent));
     const float secondsTotal = (float)(int)(T / 10.7666);                     // what the conditioner is given (ComfyUI: int(T / 10.7666))
     int steps = std::min(std::max(p.integer("steps", 8), 1), 100);

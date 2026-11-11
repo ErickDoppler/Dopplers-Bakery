@@ -139,6 +139,7 @@ bool runTTS(const Job& job, JobCtl& ctl, std::string& err) {
         if (!writeWavMono16(file, wav, SpeechDecoder::kSampleRate)) { err = "cannot write " + file; return false; }
     }
     ctl.addOutput(file);
+    { char b[32]; snprintf(b, sizeof b, "%.1f s", wav.size() / (double)SpeechDecoder::kSampleRate); ctl.info(b); }
     char done[200];
     snprintf(done, sizeof done, "%.1f s of audio in %.1f s (load %.1f s) on %s, seed %lld%s", wav.size() / (double)SpeechDecoder::kSampleRate, secs(t0), loadSec, Compute::get().description().c_str(), seed, note.c_str());
     (void)genSec;

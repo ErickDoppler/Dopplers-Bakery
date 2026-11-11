@@ -53,6 +53,7 @@ bool runImage(const Job& job, JobCtl& ctl, std::string& err) {
         resizeToFloat(initImg, W, H, initPix);
     }
     int latW = W / 8, latH = H / 8;
+    ctl.info(std::to_string(W) + "x" + std::to_string(H));
     if (latW < 8 || latH < 8) { err = "Image is too small (minimum 64x64)."; return false; }
     int steps = std::min(std::max(p.integer("steps", 10), 1), 150);
     float cfg = (float)p.num("cfg", 1.0);
