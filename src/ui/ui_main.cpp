@@ -672,9 +672,16 @@ void layoutMain() {
 
 void showSelectedPage() {
     int s = TabCtrl_GetCurSel(g_tab);
-    for (int i = 0; i < kKindCount; i++) ShowWindow(g_pages[i].hwnd, i + 1 == s ? SW_SHOW : SW_HIDE);      // tab 0 is Chat
-    if (s >= 1 && s <= kKindCount) RedrawWindow(g_pages[s - 1].hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);   // a page shown for the first time must paint all of its controls
-    chatViewShow(s == 0);
+    // hide what is not wanted first, then show and fully repaint the chosen page (it must not be painted while another page still covers it)
+    SetWindowPos(g_tab, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);              // the tab control covers the whole content area: keep it below the pages
+    chatViewShow(s == 0);                                                                                  // tab 0 is Chat
+    for (int i = 0; i < kKindCount; i++) if (i + 1 != s) ShowWindow(g_pages[i].hwnd, SW_HIDE);
+    if (s >= 1 && s <= kKindCount) {
+        Page& pg = g_pages[s - 1];
+        ShowWindow(pg.hwnd, SW_SHOW);
+        layoutPage(pg);
+        RedrawWindow(pg.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    }
 }
 
 void refreshAllReady() { for (auto& p : g_pages) refreshReady(p); }
