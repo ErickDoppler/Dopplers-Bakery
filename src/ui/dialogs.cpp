@@ -147,6 +147,7 @@ bool showModelSettings(HWND parent, Kind k) {
 namespace {
 struct DownloadDlg : Modal {
     bool first = false, any = false, running = false;
+    bool wantCuda = false, cudaActive = false;           // the optional CUDA row: queued after the models, then running
     std::vector<CatEntry> cat;
     HWND list = nullptr, bar = nullptr, status = nullptr, go = nullptr, skip = nullptr, search = nullptr;
     Downloader dl;
@@ -166,6 +167,26 @@ struct DownloadDlg : Modal {
             ListView_SetItemText(list, (int)i, 3, &st[0]);
             ListView_SetCheckState(list, (int)i, !inst && cat[i].downloadable());
         }
+        {   // last row: the optional CUDA runtime (from github.com/ggml-org/llama.cpp), not a model
+            int i = (int)cat.size(); bool inst = cudaLibsInstalled();
+            LVITEMW it = {}; it.mask = LVIF_TEXT; it.iItem = i;
+            std::wstring w = L"CUDA libraries (optional, NVIDIA GPU, larger images)"; it.pszText = &w[0];
+            ListView_InsertItem(list, &it);
+            std::wstring k = L"GPU", s = sys::widen(sys::humanSize(kCudaLibsBytes)), st = inst ? L"installed" : L"missing";
+            ListView_SetItemText(list, i, 1, &k[0]); ListView_SetItemText(list, i, 2, &s[0]); ListView_SetItemText(list, i, 3, &st[0]);
+            ListView_SetCheckState(list, i, FALSE);
+        }
+    }
+    void startCuda() {
+        cudaActive = true; wantCuda = false;
+        CudaInstaller::get().start();
+    }
+    void finishAll(const std::string& msg) {
+        running = false; cudaActive = false; wantCuda = false;
+        uiSetText(status, msg);
+        uiSetText(go, "Download selected"); EnableWindow(go, TRUE); EnableWindow(search, TRUE); uiSetText(skip, "Close");
+        refreshRows();
+        Settings::get().autoSelect();
     }
     void onCreate() override {
         cat = loadCatalog();
@@ -195,10 +216,11 @@ struct DownloadDlg : Modal {
         if (id == 1 && !running) {
             std::vector<CatEntry> pick;
             for (size_t i = 0; i < cat.size(); i++) if (ListView_GetCheckState(list, (int)i) && cat[i].downloadable()) pick.push_back(cat[i]);
-            if (pick.empty()) { uiSetText(status, "Nothing downloadable is checked."); return; }
-            running = true; any = true;
+            bool cuda = ListView_GetCheckState(list, (int)cat.size()) && !cudaLibsInstalled();
+            if (pick.empty() && !cuda) { uiSetText(status, "Nothing downloadable is checked."); return; }
+            running = true; any = true; wantCuda = cuda; cudaActive = false;
             uiSetText(go, "Working..."); EnableWindow(go, FALSE); EnableWindow(search, FALSE); uiSetText(skip, "Cancel");
-            dl.start(pick);
+            if (!pick.empty()) dl.start(pick); else startCuda();
         } else if (id == 3 && !running) {
             std::string folder;
             if (!pickFolder(hwnd, folder, L"Select a folder to search for models (subfolders are included)")) return;
@@ -209,12 +231,22 @@ struct DownloadDlg : Modal {
             refreshRows();
             uiSetText(status, "Found " + std::to_string(hits) + " of " + std::to_string(cat.size()) + " models; they are selected for their tabs.");
         } else if (id == 2) {
-            if (running) { dl.st.cancel = true; uiSetText(status, "Cancelling..."); }
+            if (running && cudaActive) close();                 // the CUDA download carries on in the background; Model settings shows its state
+            else if (running) { dl.st.cancel = true; wantCuda = false; uiSetText(status, "Cancelling..."); }
             else close();
         }
     }
     void onTimer() override {
         if (!running) return;
+        if (cudaActive) {                                   // the CUDA libraries are downloading / unpacking
+            CudaInstaller& ci = CudaInstaller::get();
+            SendMessageW(bar, PBM_SETPOS, (WPARAM)(ci.progress() * 1000), 0);
+            if (ci.running()) { uiSetText(status, ci.status()); return; }
+            bool ok = ci.done();
+            finishAll(ci.status());
+            if (ok && MessageBoxW(hwnd, L"The CUDA libraries are installed.\n\nRestart the app now to start using them?", L"Dopplers Bakery", MB_YESNO | MB_ICONQUESTION) == IDYES) restartApp(hwnd);
+            return;
+        }
         auto& st = dl.st;
         unsigned long long d = st.doneBytes, t = st.totalBytes;
         SendMessageW(bar, PBM_SETPOS, t ? (WPARAM)(d * 1000 / t) : 0, 0);
@@ -223,17 +255,15 @@ struct DownloadDlg : Modal {
         if (!st.finished) {
             uiSetText(status, "(" + std::to_string(idx) + "/" + std::to_string(cnt) + ") " + cur + "   " + sys::humanSize(d) + " / " + sys::humanSize(t));
         } else {
-            dl.join(); running = false;
+            dl.join();
             std::string err; { std::lock_guard<std::mutex> g(st.m); err = st.error; }
-            if (st.ok) { uiSetText(status, "Done."); SendMessageW(bar, PBM_SETPOS, 1000, 0); }
-            else uiSetText(status, err.empty() ? "Cancelled (partial files are kept and resume next time)." : "Failed: " + err);
-            uiSetText(go, "Download selected"); EnableWindow(go, TRUE); EnableWindow(search, TRUE); uiSetText(skip, "Close");
-            refreshRows();
-            Settings::get().autoSelect();
+            if (st.ok && wantCuda) { SendMessageW(bar, PBM_SETPOS, 0, 0); startCuda(); return; }      // models done: now the CUDA libraries
+            if (st.ok) SendMessageW(bar, PBM_SETPOS, 1000, 0);
+            finishAll(st.ok ? "Done." : (err.empty() ? "Cancelled (partial files are kept and resume next time)." : "Failed: " + err));
         }
     }
     bool onClose() override {
-        if (running) { dl.st.cancel = true; uiSetText(status, "Cancelling... close again when it stops."); return false; }
+        if (running && !cudaActive) { dl.st.cancel = true; wantCuda = false; uiSetText(status, "Cancelling... close again when it stops."); return false; }
         return true;
     }
 };
