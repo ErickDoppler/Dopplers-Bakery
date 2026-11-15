@@ -67,7 +67,7 @@ std::string ChatAgent::systemPrompt() {
              "strength (optional, 0.2-1.0, how much to change the input image, default 0.6; 0.3 small tweak, 0.8 big change).\n";
     if (Settings::get().tabReady(Kind::Audio, &why))
         s += std::to_string(++n) + ". generate_audio - arguments: prompt (English), kind (\"music\", \"sfx\", \"instrument\" or \"one_shot\"), "
-             "seconds (integer; music 15-90, sfx 2-10, one_shot 1-5).\n";
+             "seconds (integer, exactly the length the user asked for converted to seconds, e.g. 2 minutes = 120; allowed: music 4-300, instrument 4-30, sfx 1-15, one_shot 1-6; if the user gives no length use 60 for music).\n";
     if (Settings::get().tabReady(Kind::TTS, &why))
         s += std::to_string(++n) + ". speak - arguments: text (string); reads exactly that text aloud.\n";
     if (n > 0 && chatImageLimit() < 2048)
@@ -165,15 +165,22 @@ bool ChatAgent::launchCall(const Call& c, std::vector<Pending>& pending, Json& r
         if (!Settings::get().tabReady(Kind::Audio, &why)) return fail("audio generation is not set up: " + why);
         std::string prompt = trim(c.args.str("prompt"));
         if (prompt.empty()) return fail("missing prompt");
-        std::string kind = c.args.str("kind", "music"), mode = "Music"; int def = 30, lo = 15, hi = 90;
+        std::string kind = c.args.str("kind", "music"), mode = "Music"; int def = 60, lo = 4, hi = 300;
         if (kind == "sfx") { mode = "SFX"; def = 5; lo = 1; hi = 15; }
         else if (kind == "instrument") { mode = "Instrument"; def = 12; lo = 4; hi = 30; }
         else if (kind == "one_shot" || kind == "one-shot") { mode = "One-shot"; def = 2; lo = 1; hi = 6; }
         Json form = Json::object();
-        form["prompt"] = prompt; form["mode"] = mode; form["length"] = clampInt(c.args.num("seconds", def), lo, hi);
+        const double asked = c.args.num("seconds", def);
+        const int secs = clampInt(asked, lo, hi);
+        form["prompt"] = prompt; form["mode"] = mode; form["length"] = secs;
         form["enhance"] = true; form["format"] = "mp3"; form["seed"] = -1; form["backend"] = chatBackend();
+        std::string lenNote;
+        if ((int)std::llround(asked) != secs)            // outside what this kind of audio allows: say so instead of silently changing it
+            lenNote = "The audio was made " + std::to_string(secs) + " s long instead of the requested " + std::to_string((int)std::llround(asked)) +
+                      " s (the limit for this kind of audio is " + std::to_string(lo) + "-" + std::to_string(hi) + " s).";
         int id = JobQueue::get().add(Kind::Audio, makeJobParams(Kind::Audio, form), "chat: " + jobTitle(Kind::Audio, form));
-        pending.push_back({id, c.name});
+        pending.push_back({id, c.name, lenNote});
+        if (!lenNote.empty()) transcript_.push_back({"info", lenNote, {}});
     } else if (c.name == "speak") {
         if (!Settings::get().tabReady(Kind::TTS, &why)) return fail("speech is not set up: " + why);
         std::string text = trim(c.args.str("text"));
@@ -198,7 +205,7 @@ void ChatAgent::finishLlmTurn(const std::string& raw, bool allowTools) {
         bool ok; Json j = Json::parse(trim(body), &ok);
         if (ok && j.t == Json::Obj) {
             Call c; c.name = j.str("name"); c.args = j.get("arguments").t == Json::Obj ? j.get("arguments") : Json::object();
-            if (!c.name.empty()) calls.push_back(c);
+            if (!c.name.empty()) { calls.push_back(c); logLine("chat tool call: " + c.name + " " + c.args.dump()); }
         }
         if (b == std::string::npos) break;
         pos = b + 12;
@@ -267,6 +274,7 @@ bool ChatAgent::poll() {
                 r["files"] = fl;
                 if (pnd.tool == "generate_audio" && !j.text.empty()) r["expanded_prompt"] = j.text;
                 if (pnd.tool == "generate_image") { if (!j.info.empty()) r["size"] = j.info; if (!pnd.note.empty()) r["note"] = pnd.note; }
+                if (pnd.tool == "generate_audio") { if (!j.info.empty()) r["length"] = j.info; if (!pnd.note.empty()) r["note"] = pnd.note; }
             }
             toolResults_.push(r);
         }
