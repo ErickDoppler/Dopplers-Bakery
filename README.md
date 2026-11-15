@@ -3,6 +3,8 @@
 An offline studio for **chat, images, music, sound effects and speech** on your own Windows PC.
 A native C++ app (ggml / llama.cpp), no Python, no ComfyUI, no cloud. Talk to the assistant and it makes pictures, audio and a spoken reply; edit your own pictures; use the same chat from a browser.
 
+![Dopplers Bakery: the chat made a picture and music, the queue on the right](docs/screenshot.png)
+
 > ## ⚠️ Read this first: the app downloads gigabytes of data
 > The program itself is small (~70 MB), but it **does not contain any AI models**. To work it needs about **36 GB** of model files
 > (all features ≈ 36 GB; images only ≈ 18.6 GB; speech only ≈ 4.5 GB). On first launch it offers to download them from Hugging Face
@@ -14,7 +16,8 @@ A native C++ app (ggml / llama.cpp), no Python, no ComfyUI, no cloud. Talk to th
 - **Pictures in chat**: attach with the **+** button, drag & drop, or Ctrl+V; then say how to change it (image-to-image).
 - **Chat in the browser**: the same chat on `http://127.0.0.1:8787` (menu *Web*), images and sound play in the page. *Share on the local network* is opt-in and protected by a secret key in the link.
 - **Tabs**: LLM (Qwen), TTS (Qwen3-TTS, incl. voice cloning with the Base model), Text to image (Krea 2, image-to-image), Audio (Stable Audio 3, MP3/WAV).
-- Job **queue** with columns `#` | `Tab` | `Progress` (percent, then Done / Failed) | `Speed / size / length` (tokens per second, image size or audio length) | `Time`; click a job to see its prompt and details. Pause, cancel, reorder; hide the panel, drag its edge to resize it, resize its columns.
+- Job **queue** with columns `#` | `Tab` | `Progress` (percent, then Done / Failed) | `Speed / size / length` (tokens per second, image size or audio length) | `Time`; click a job to see its prompt and details. The title counts the jobs (running / waiting / done), click a column header to sort, the list keeps its scroll position and follows the running job. Pause, cancel, reorder; hide the panel, drag its edge to resize it, resize its columns.
+- **Audio tab**: a player under the list (Prev / Play-Pause / Stop / Next, position bar, name and time of what is playing, stop works even after the list was cleared) and keyboard shortcuts: **F2** generate, **F3** play / stop the newest result, **Shift+Delete** delete the selected result and its file (to the Recycle Bin). Audio in the chat has a position bar you can drag.
 - Command line mode; models are plain files you can reuse from ComfyUI folders.
 
 ## Requirements
@@ -49,6 +52,11 @@ Optional:
 
 Notes on the sources: these are vendor / community mirrors on Hugging Face and the links may change (checked 2026-11-12). The image model `realiaKrea2_v10` is a community fine-tune of [Krea 2](https://huggingface.co/krea/Krea-2-Raw) (FP8). It is downloaded from a third-party Hugging Face mirror of Civitai files (`Buattensorart2/dari_civitai`, link pinned to one commit; that repository also hosts unrelated adult LoRAs, only this one file is used) - the mirror can disappear, and the licence is the one on the model's Civitai page and the Krea 2 license. The Qwen3-VL text encoder comes from [AlperKTS/Krea2_FP8](https://huggingface.co/AlperKTS/Krea2_FP8) (it also hosts `krea2_turbo_fp8.safetensors`, a faster but lower-quality turbo variant that the app can use too).
 Check the license of each model before using or sharing its outputs.
+
+## Laptops, integrated GPUs and low memory
+- Integrated GPUs (Intel, AMD APU) are used through Vulkan like any other GPU; on a PC whose only GPU is integrated the *Text to image* tab shows a **Backend** selector (Auto / Vulkan / CPU).
+- The image models need about 19 GB of free RAM in 8-bit form. If less is free the app switches to a **4-bit low-memory mode** by itself (about 11 GB, quality is still good); if even that does not fit it says so instead of crashing.
+- If the app ever dies inside a GPU job, the next start says so and uses the CPU until a GPU job succeeds again (choose Backend = Vulkan to retry). Engine warnings and crash details are written to `bakery.log` next to the exe: attach it when reporting a problem.
 
 ## Command line
 ```

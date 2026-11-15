@@ -29,8 +29,11 @@ std::string hideToolCalls(const std::string& s) {
 
 int clampInt(double v, int lo, int hi) { return (int)std::min<double>(hi, std::max<double>(lo, std::llround(v))); }
 // the chat always uses CUDA when its libraries are installed (any size), otherwise Vulkan (capped)
-std::string chatBackend() { return Compute::hasCuda() ? "CUDA" : (Compute::hasVulkan() ? "Vulkan" : ""); }
-int chatImageLimit() { return std::min(2048, Compute::imageSideLimit(chatBackend())); }
+std::string chatBackend() {
+    if (Compute::safeMode()) return "cpu";                             // the last GPU job crashed the app
+    return Compute::hasCuda() ? "CUDA" : (Compute::hasVulkan() ? "Vulkan" : "");
+}
+int chatImageLimit() { return chatBackend() == "cpu" ? 1024 : std::min(2048, Compute::imageSideLimit(chatBackend())); }
 
 std::string speakable(const std::string& s) {                     // plain sentences only, short enough to read aloud
     std::string t;

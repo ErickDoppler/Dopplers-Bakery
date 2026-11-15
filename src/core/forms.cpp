@@ -43,8 +43,11 @@ const std::vector<Field>& fieldsOf(Kind k) {
         {"seed", "Seed (-1 = random)", FT::Int, -1, -1, 2147483647, "", "", 0},
         {"lora_strength", "LoRA strength", FT::Float, 0.9, -2, 2, "", "", 0},
         };
-        if (Compute::hasCuda())      // only offered when the CUDA libraries are installed (Model settings > Download CUDA libraries)
-            v.insert(v.begin() + 5, {"backend", "Backend: Vulkan = fast, up to 1264 px; CUDA = any size, slower", FT::Combo, 0, 0, 0, "Vulkan", "Vulkan|CUDA", 0});
+        // Backend choice: offered with the CUDA libraries, on a PC whose only GPU is an integrated one (Intel / APU), and after a crash
+        if (Compute::hasCuda() || Compute::onlyIntegratedGpu() || Compute::safeMode()) {
+            static const std::string items = Compute::hasCuda() ? "Auto|Vulkan|CUDA|CPU" : "Auto|Vulkan|CPU";
+            v.insert(v.begin() + 5, {"backend", "Backend: Auto = Vulkan GPU (up to 1264 px), CPU after a crash; CUDA = any size; CPU = slow but safe", FT::Combo, 0, 0, 0, "Auto", items.c_str(), 0});
+        }
         return v;
     }();
     static const std::vector<Field> aud = {

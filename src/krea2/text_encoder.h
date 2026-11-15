@@ -12,6 +12,7 @@ public:
     // Loads the scaled-FP8 safetensors and converts the linears to Q8_0 (about 4 GB RAM).
     bool load(const std::string& path, int threads, std::string& err, const std::function<void(float)>& progress = nullptr);
     void unload();
+    int quantBits = 8;                  // 8 (default) or 4 (low-memory mode); set before load()
     bool loaded() const { return backend_ != nullptr; }
 
     // ids = tokens of the templated prompt. Output: tokens x (12*2560), tap-major per token, with the

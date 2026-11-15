@@ -17,18 +17,21 @@
 #include "core/settings.h"
 #include "ui/dialogs.h"
 #include "ui/modal.h"
+#include "ui/player.h"
 #include "util/image_io.h"
+#include "util/crashlog.h"
 #include "util/sys.h"
 
 namespace {
 
 enum {
-    IDC_CREATE = 1001, IDC_SETTINGS, IDC_OUTLIST, IDC_PREVIEW, IDC_COPY, IDC_DELETE,
+    IDC_CREATE = 1001, IDC_SETTINGS, IDC_OUTLIST, IDC_PREVIEW, IDC_COPY, IDC_DELETE, IDC_PL_PREV, IDC_PL_PLAY, IDC_PL_STOP, IDC_PL_NEXT, IDC_PL_TRK,
     IDC_FIELD0 = 2000, IDC_BROWSE0 = 2500,
     IDC_QLIST = 3001, IDC_QUP, IDC_QDOWN, IDC_QREMOVE, IDC_QPAUSE, IDC_QCANCEL, IDC_QCLEAR, IDC_QDETAILS, IDC_QPROG, IDC_QSTAT, IDC_QTOGGLE, IDC_QDETAIL,
 
     IDM_OPENOUT = 4001, IDM_EXIT, IDM_DOWNLOAD, IDM_ADDROOT, IDM_ABOUT, IDM_WEB, IDM_WEBLAN, IDM_QUEUE,
 };
+std::string g_recovered;              // what the previous run was doing when it died (empty: normal exit)
 const UINT WM_FIRSTRUN = WM_APP + 1;
 const int kQueueMinW = 340;
 
@@ -48,14 +51,17 @@ struct Page {
     bool ready = true;
     std::vector<OutItem> outs;
     std::string sig;
+    // audio tabs: a small player under the list (Prev / Play-Pause / Stop / Next, position bar, what is playing)
+    HWND bPrev = nullptr, bPlay = nullptr, bStop = nullptr, bNext = nullptr, trk = nullptr, lblNow = nullptr;
+    bool seeking = false;
 };
+inline bool pagePlays(const Page& p) { return p.trk != nullptr; }
 
 HWND g_main, g_tab, g_qTitle, g_qList, g_qStat, g_qProg, g_qToggle = nullptr, g_qDetail = nullptr;
 HWND g_qBtn[8];
 Page g_pages[kKindCount];
 std::vector<int> g_qIds;          // job id per queue row
 std::string g_qSig;
-std::string g_playing;
 
 Page& pageOf(HWND h) { return *(Page*)GetWindowLongPtrW(h, GWLP_USERDATA); }
 bool smallField(const Field& f) { return f.type == FT::Int || f.type == FT::Float || f.type == FT::Combo || f.type == FT::Check; }
@@ -210,21 +216,29 @@ void layoutForm(Page& p) {
 void layoutPage(Page& p) {
     RECT rc; GetClientRect(p.hwnd, &rc);
     int W = rc.right, H = rc.bottom;
+    const int playerH = pagePlays(p) ? 58 : 0;
     int warnH = p.ready ? 0 : 36, actH = 0, outH = 120, outBtnH = 32;
     ShowWindow(p.warn, p.ready ? SW_HIDE : SW_SHOW);
     uiPlace(p.warn, 6, 4, W - 12, warnH);
     int top = warnH ? warnH + 6 : 0;
-    int formH = std::max(60, H - top - actH - outH - outBtnH - 6);
+    int formH = std::max(60, H - top - actH - outH - outBtnH - playerH - 6);
     uiPlace(p.form, 0, top, W, formH);
     int y = top + formH + 4;
     y += actH;
     uiPlace(p.list, 8, y, W - 16, outH);
     ListView_SetColumnWidth(p.list, 1, std::max(120, W - 16 - 130 - 22));
     y += outH + 4;
-    int bw = 96;
+    int bw = pagePlays(p) ? 150 : 96;
     uiPlace(p.bPreview, 8, y, bw, 26);
     uiPlace(p.bCopy, 8 + bw + 6, y, bw, 26);
     uiPlace(p.bDelete, 8 + 2 * (bw + 6), y, bw, 26);
+    if (pagePlays(p)) {
+        y += 32;
+        uiPlace(p.lblNow, 8, y, W - 16, 18);
+        y += 20;
+        uiPlace(p.bPrev, 8, y, 60, 26); uiPlace(p.bPlay, 74, y, 80, 26); uiPlace(p.bStop, 160, y, 60, 26); uiPlace(p.bNext, 226, y, 60, 26);
+        uiPlace(p.trk, 296, y, std::max(60, W - 296 - 8), 26);
+    }
     layoutForm(p);
 }
 
@@ -268,21 +282,56 @@ void refreshOutputs(Page& p) {
 
 bool isAudio(Kind k) { return k == Kind::TTS || k == Kind::Audio; }
 
-void stopPlayback() {
-    mciSendStringW(L"close bakery", nullptr, 0, nullptr);
-    g_playing.clear();
-}
+void stopPlayback() { Player::get().release(); }
+// Play / Stop on a file: a second press on the file that is playing stops it (and rewinds)
 void playFile(const std::string& path) {
-    bool same = g_playing == path;
-    stopPlayback();
-    if (same) return;                                 // second click on the same item stops it
-    std::string lp = path; for (auto& c : lp) c = (char)tolower((unsigned char)c);
-    bool wav = lp.size() > 4 && lp.compare(lp.size() - 4, 4, ".wav") == 0;
-    std::wstring cmd = L"open \"" + sys::widen(path) + L"\" type " + (wav ? L"waveaudio" : L"mpegvideo") + L" alias bakery";
-    if (mciSendStringW(cmd.c_str(), nullptr, 0, nullptr) == 0) {
-        mciSendStringW(L"play bakery", nullptr, 0, nullptr);
-        g_playing = path;
+    Player& pl = Player::get();
+    if (pl.current() == path && pl.playing()) { pl.stop(); return; }
+    pl.play(path);
+}
+
+// ----- the small player under the list on the audio tabs
+int outIndexOf(const Page& p, const std::string& path) {
+    for (size_t i = 0; i < p.outs.size(); i++) if (p.outs[i].path == path) return (int)i;
+    return -1;
+}
+void selectOut(Page& p, int i) {
+    ListView_SetItemState(p.list, -1, 0, LVIS_SELECTED);
+    if (i >= 0 && i < (int)p.outs.size()) { ListView_SetItemState(p.list, i, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED); ListView_EnsureVisible(p.list, i, FALSE); }
+}
+void playerStep(Page& p, int dir) {                  // previous / next file of the list (newest first); starts it
+    Player& pl = Player::get();
+    int cur = outIndexOf(p, pl.current());
+    if (cur < 0) cur = ListView_GetNextItem(p.list, -1, LVNI_SELECTED);
+    if (p.outs.empty()) return;
+    int n = cur < 0 ? (dir > 0 ? 0 : (int)p.outs.size() - 1) : cur + dir;
+    if (n < 0 || n >= (int)p.outs.size()) return;
+    selectOut(p, n);
+    pl.play(p.outs[n].path);
+}
+void playerToggle(Page& p) {                         // Play/Pause: the loaded file, otherwise the selected one, otherwise the newest
+    Player& pl = Player::get();
+    if (pl.loaded()) { pl.toggle(); return; }
+    int sel = ListView_GetNextItem(p.list, -1, LVNI_SELECTED);
+    if (sel < 0) sel = 0;
+    if (sel < (int)p.outs.size()) { selectOut(p, sel); pl.play(p.outs[sel].path); }
+}
+void updatePlayer(Page& p) {
+    if (!pagePlays(p)) return;
+    Player& pl = Player::get();
+    bool playing = pl.playing();
+    std::string name = pl.loaded() ? pl.current().substr(pl.current().find_last_of("\\/") + 1) : "";
+    std::string txt = !pl.loaded() ? "Nothing playing" : name + "    " + Player::timeText(pl.positionMs()) + " / " + Player::timeText(pl.lengthMs()) + (playing ? "" : "   (stopped)");
+    if (uiText(p.lblNow) != txt) uiSetText(p.lblNow, txt);
+    std::string cap = playing ? "Pause" : "Play";
+    if (uiText(p.bPlay) != cap) uiSetText(p.bPlay, cap);
+    if (!p.seeking) {
+        long long len = pl.lengthMs();
+        int pos = len > 0 ? (int)(pl.positionMs() * 1000 / len) : 0;
+        if ((int)SendMessageW(p.trk, TBM_GETPOS, 0, 0) != pos) SendMessageW(p.trk, TBM_SETPOS, TRUE, pos);
     }
+    EnableWindow(p.trk, pl.loaded());
+    EnableWindow(p.bStop, pl.loaded());
 }
 
 void onOutputAction(Page& p, int id) {
@@ -297,7 +346,7 @@ void onOutputAction(Page& p, int id) {
         if (p.kind == Kind::LLM) clipboardSetText(g_main, it.text);
         else clipboardSetFile(g_main, it.path);
     } else if (id == IDC_DELETE) {
-        if (g_playing == it.path) stopPlayback();
+        if (Player::get().current() == it.path) Player::get().release();      // MCI keeps the file open: let go of it before deleting
         std::wstring w = sys::widen(it.path); w.push_back(0); w.push_back(0);
         SHFILEOPSTRUCTW op = {}; op.hwnd = g_main; op.wFunc = FO_DELETE; op.pFrom = w.c_str();
         op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT;
@@ -340,6 +389,20 @@ LRESULT CALLBACK pageProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             break;
         case IDC_SETTINGS: if (showModelSettings(g_main, p->kind)) refreshReady(*p); return 0;
         case IDC_PREVIEW: case IDC_COPY: case IDC_DELETE: onOutputAction(*p, LOWORD(wp)); return 0;
+        case IDC_PL_PREV: playerStep(*p, -1); updatePlayer(*p); return 0;
+        case IDC_PL_NEXT: playerStep(*p, +1); updatePlayer(*p); return 0;
+        case IDC_PL_PLAY: playerToggle(*p); updatePlayer(*p); return 0;
+        case IDC_PL_STOP: Player::get().stop(); updatePlayer(*p); return 0;
+        }
+        break;
+    case WM_HSCROLL:                                                    // the position bar of the audio tabs
+        if ((HWND)lp == p->trk) {
+            int code = LOWORD(wp);
+            p->seeking = code != TB_ENDTRACK;
+            Player::get().seek((double)SendMessageW(p->trk, TBM_GETPOS, 0, 0) / 1000.0);
+            if (code == TB_ENDTRACK) p->seeking = false;
+            updatePlayer(*p);
+            return 0;
         }
         break;
     case WM_NOTIFY:
@@ -414,7 +477,7 @@ void buildPage(Page& p, Kind kind) {
         }
         p.fc.push_back(c);
     }
-    p.bCreate = uiMake(p.form, L"BUTTON", "Create", BS_OWNERDRAW | WS_TABSTOP, IDC_CREATE);
+    p.bCreate = uiMake(p.form, L"BUTTON", kind == Kind::Audio ? "Create  (F2)" : "Create", BS_OWNERDRAW | WS_TABSTOP, IDC_CREATE);
     SetWindowSubclass(p.bCreate, hoverProc, 1, 0);
     p.bSettings = uiMake(p.form, L"BUTTON", "Model settings...", BS_PUSHBUTTON | WS_TABSTOP, IDC_SETTINGS);
     SendMessageW(p.bSettings, WM_SETFONT, (WPARAM)btnFont(false), TRUE);
@@ -423,9 +486,19 @@ void buildPage(Page& p, Kind kind) {
     const wchar_t* cols[] = {L"Result of", L"Output (this session)"}; int cw[] = {90, 300};
     for (int k = 0; k < 2; k++) { LVCOLUMNW c = {}; c.mask = LVCF_TEXT | LVCF_WIDTH; c.pszText = (LPWSTR)cols[k]; c.cx = cw[k]; ListView_InsertColumn(p.list, k, &c); }
     bool audio = isAudio(kind);
-    p.bPreview = uiMake(p.hwnd, L"BUTTON", audio ? "Play / Stop" : "Preview", BS_PUSHBUTTON | WS_TABSTOP, IDC_PREVIEW);
+    const bool music = kind == Kind::Audio;           // the Audio (music) tab also has keyboard shortcuts: F2 / F3 / Shift+Delete
+    p.bPreview = uiMake(p.hwnd, L"BUTTON", music ? "Play / Stop latest (F3)" : audio ? "Play / Stop" : "Preview", BS_PUSHBUTTON | WS_TABSTOP, IDC_PREVIEW);
     p.bCopy = uiMake(p.hwnd, L"BUTTON", kind == Kind::LLM ? "Copy text" : "Copy file", BS_PUSHBUTTON | WS_TABSTOP, IDC_COPY);
-    p.bDelete = uiMake(p.hwnd, L"BUTTON", "Delete", BS_PUSHBUTTON | WS_TABSTOP, IDC_DELETE);
+    p.bDelete = uiMake(p.hwnd, L"BUTTON", music ? "Delete (Shift+Del)" : "Delete", BS_PUSHBUTTON | WS_TABSTOP, IDC_DELETE);
+    if (audio) {
+        p.lblNow = uiMake(p.hwnd, L"STATIC", "Nothing playing", SS_LEFT | SS_ENDELLIPSIS);
+        p.bPrev = uiMake(p.hwnd, L"BUTTON", "Prev", BS_PUSHBUTTON | WS_TABSTOP, IDC_PL_PREV);
+        p.bPlay = uiMake(p.hwnd, L"BUTTON", "Play", BS_PUSHBUTTON | WS_TABSTOP, IDC_PL_PLAY);
+        p.bStop = uiMake(p.hwnd, L"BUTTON", "Stop", BS_PUSHBUTTON | WS_TABSTOP, IDC_PL_STOP);
+        p.bNext = uiMake(p.hwnd, L"BUTTON", "Next", BS_PUSHBUTTON | WS_TABSTOP, IDC_PL_NEXT);
+        p.trk = uiMake(p.hwnd, TRACKBAR_CLASSW, "", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, IDC_PL_TRK);
+        SendMessageW(p.trk, TBM_SETRANGE, TRUE, MAKELONG(0, 1000));
+    }
     Json saved = Settings::get().form(kind);
     writeForm(p, saved);
     applyImageLimits(p);
@@ -516,17 +589,82 @@ void refreshDetails() {
     SendMessageW(g_qDetail, EM_LINESCROLL, 0, first);        // keep the reading position while a running job updates
 }
 
+// ----- display order (click a column header to sort: ascending, descending, back to queue order)
+int g_qSortCol = -1; bool g_qSortAsc = true;
+bool g_qDirty = true;                 // something changed outside refreshQueue (clear, move, sort): rebuild the rows
+int g_qFollowId = 0;                  // running job the list was last scrolled to
+
+double leadingNumber(const std::string& s) { return s.empty() ? 0.0 : atof(s.c_str()); }
+double progressRank(const Job& j) {
+    switch (j.state) {
+    case JobState::Queued: return -2; case JobState::Held: return -1;
+    case JobState::Running: case JobState::Paused: return j.progress * 100.0;
+    case JobState::Done: return 200; case JobState::Failed: return 201; default: return 202;
+    }
+}
+double seconds(const Job& j) {
+    if (j.tStart <= 0) return 0;
+    if (j.state == JobState::Running || j.state == JobState::Paused) return sys::now() - j.tStart;
+    return j.tEnd >= j.tStart ? j.tEnd - j.tStart : 0;
+}
+std::vector<const Job*> displayOrder(const std::vector<Job>& jobs) {
+    std::vector<const Job*> o;
+    for (auto& j : jobs) o.push_back(&j);
+    if (g_qSortCol < 0) return o;
+    const int c = g_qSortCol; const bool asc = g_qSortAsc;
+    std::stable_sort(o.begin(), o.end(), [&](const Job* a, const Job* b) {
+        double ka = 0, kb = 0; std::string sa, sb; bool text = false;
+        switch (c) {
+        case 0: ka = a->id; kb = b->id; break;
+        case 1: sa = kindTitle(a->kind); sb = kindTitle(b->kind); text = true; break;
+        case 2: ka = progressRank(*a); kb = progressRank(*b); break;
+        case 3: ka = leadingNumber(infoText(*a)); kb = leadingNumber(infoText(*b)); break;
+        default: ka = seconds(*a); kb = seconds(*b); break;
+        }
+        if (text) return asc ? sa < sb : sa > sb;
+        return asc ? ka < kb : ka > kb;
+    });
+    return o;
+}
+void showSortArrow() {
+    HWND hd = ListView_GetHeader(g_qList);
+    for (int i = 0; i < 5; i++) {
+        HDITEMW it = {}; it.mask = HDI_FORMAT;
+        Header_GetItem(hd, i, &it);
+        it.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
+        if (i == g_qSortCol) it.fmt |= g_qSortAsc ? HDF_SORTUP : HDF_SORTDOWN;
+        Header_SetItem(hd, i, &it);
+    }
+}
+void onQueueColumnClick(int col) {
+    if (g_qSortCol == col) { if (g_qSortAsc) g_qSortAsc = false; else g_qSortCol = -1; }
+    else { g_qSortCol = col; g_qSortAsc = true; }
+    showSortArrow();
+    for (int i = 1; i <= 2; i++) EnableWindow(g_qBtn[i - 1], g_qSortCol < 0);                  // Move up / Move down act on the queue order
+    g_qDirty = true;
+}
+int listRowHeight() {
+    RECT r;
+    if (ListView_GetItemRect(g_qList, 0, &r, LVIR_BOUNDS)) return std::max<int>(1, r.bottom - r.top);
+    return 19;
+}
+void scrollListBy(int rows) { if (rows) ListView_Scroll(g_qList, 0, rows * listRowHeight()); }
+
 void refreshQueue() {
     auto jobs = JobQueue::get().snapshot();
-    std::string sig;
-    for (auto& j : jobs) sig += std::to_string(j.id) + stateName(j.state) + ";";
-    if (sig != g_qSig) {                                     // rows added, removed, reordered or changed state: rebuild
-        g_qSig = sig;
-        int keep = selectedJob();
+    auto order = displayOrder(jobs);
+
+    std::string sig = std::to_string(g_qSortCol) + (g_qSortAsc ? "a" : "d") + ":";
+    for (auto* j : order) { sig += std::to_string(j->id); if (g_qSortCol >= 2) sig += stateName(j->state); sig += ";"; }
+    if (g_qDirty || sig != g_qSig) {                         // rows added, removed, reordered or re-sorted: rebuild, but keep the scroll position
+        g_qDirty = false; g_qSig = sig;
+        int keep = selectedJob(), top = ListView_GetTopIndex(g_qList);
+        SendMessageW(g_qList, WM_SETREDRAW, FALSE, 0);
         ListView_DeleteAllItems(g_qList);
         g_qIds.clear(); g_qCache.clear();
         int row = 0;
-        for (auto& j : jobs) {
+        for (auto* jp : order) {
+            const Job& j = *jp;
             LVITEMW it = {}; it.mask = LVIF_TEXT; it.iItem = row;
             std::wstring a = sys::widen(std::to_string(j.id)); it.pszText = &a[0];
             ListView_InsertItem(g_qList, &it);
@@ -536,13 +674,40 @@ void refreshQueue() {
             if (j.id == keep) ListView_SetItemState(g_qList, row, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
             row++;
         }
+        scrollListBy(std::min(top, std::max(0, row - 1)));   // back to where the user was looking
+        SendMessageW(g_qList, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(g_qList, nullptr, TRUE);
     }
-    for (size_t row = 0; row < jobs.size() && row < g_qCache.size(); row++) {       // live cells: progress, info, time
-        std::array<std::string, 3> now = {progressText(jobs[row]), infoText(jobs[row]), timeText(jobs[row])};
+    // the job that is running now: keep it in view, about the 4th row from the top, when it starts
+    int runningId = 0, runningRow = -1;
+    for (size_t r = 0; r < order.size(); r++) if (order[r]->state == JobState::Running) { runningId = order[r]->id; runningRow = (int)r; break; }
+    if (runningId != g_qFollowId) {
+        g_qFollowId = runningId;
+        if (runningId && ListView_GetCountPerPage(g_qList) < (int)order.size()) scrollListBy(std::max(0, runningRow - 3) - ListView_GetTopIndex(g_qList));
+    }
+    for (size_t row = 0; row < order.size() && row < g_qCache.size(); row++) {       // live cells: progress, info, time
+        std::array<std::string, 3> now = {progressText(*order[row]), infoText(*order[row]), timeText(*order[row])};
         for (int c = 0; c < 3; c++) if (now[c] != g_qCache[row][c]) {
             g_qCache[row][c] = now[c];
             std::wstring w = sys::widen(now[c]); ListView_SetItemText(g_qList, (int)row, 2 + c, &w[0]);
         }
+    }
+    // how many jobs: "Queue: 7 jobs (1 running, 3 waiting, 3 done)"
+    {
+        int run = 0, wait = 0, done = 0, bad = 0;
+        for (auto& j : jobs) {
+            if (j.state == JobState::Running || j.state == JobState::Paused) run++;
+            else if (j.state == JobState::Queued || j.state == JobState::Held) wait++;
+            else if (j.state == JobState::Done) done++; else bad++;
+        }
+        std::string t = "Queue: " + std::to_string(jobs.size()) + (jobs.size() == 1 ? " job" : " jobs");
+        if (!jobs.empty()) {
+            t += " (";
+            auto add = [&](int n, const char* w) { if (n) { if (t.back() != '(') t += ", "; t += std::to_string(n) + " " + w; } };
+            add(run, "running"); add(wait, "waiting"); add(done, "done"); add(bad, "failed/canceled");
+            t += ")";
+        }
+        if (uiText(g_qTitle) != t) uiSetText(g_qTitle, t);
     }
     // status line for the active job
     std::string stat = "Idle"; int prog = 0;
@@ -563,7 +728,7 @@ void refreshQueue() {
 void onQueueCommand(int id) {
     auto& q = JobQueue::get();
     int jid = selectedJob();
-    if (id == IDC_QCLEAR) { q.clearFinished(); g_qSig.clear(); refreshQueue(); return; }
+    if (id == IDC_QCLEAR) { q.clearFinished(); g_qDirty = true; refreshQueue(); return; }
     if (!jid) { MessageBoxW(g_main, L"Select a job in the queue first.", L"Dopplers Bakery", MB_OK | MB_ICONINFORMATION); return; }
     Job j; if (!q.find(jid, j)) return;
     switch (id) {
@@ -578,7 +743,7 @@ void onQueueCommand(int id) {
     case IDC_QCANCEL: q.cancel(jid); break;
     case IDC_QDETAILS: showTextViewer(g_main, "Job " + std::to_string(jid), jobDetails(j)); break;
     }
-    g_qSig.clear(); refreshQueue();
+    g_qDirty = true; refreshQueue();
     // keep the moved job selected
     for (size_t i = 0; i < g_qIds.size(); i++) if (g_qIds[i] == jid) ListView_SetItemState(g_qList, (int)i, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
 }
@@ -696,6 +861,13 @@ void firstRun() {
         Settings::get().autoSelect();
     }
     refreshAllReady();
+    if (!g_recovered.empty()) {                                   // the previous run ended inside a GPU job: explain and what changed
+        std::string what = g_recovered; g_recovered.clear();
+        MessageBoxW(g_main, sys::widen("The previous session ended unexpectedly while it was working on:\n\n" + what +
+                    "\n\nTo avoid another crash, pictures, speech and audio now use the CPU (slower but safe). To try the GPU again choose Backend = Vulkan on the Text to image tab; "
+                    "if that job succeeds the app goes back to using the GPU on its own.\n\nTechnical details are in bakery.log next to the program.").c_str(),
+                    L"Dopplers Bakery", MB_OK | MB_ICONWARNING);
+    }
 }
 
 HMENU buildMenu() {
@@ -755,7 +927,7 @@ LRESULT CALLBACK mainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_SIZE: if (wp != SIZE_MINIMIZED && g_tab) layoutMain(); return 0;
     case WM_GETMINMAXINFO: { auto* mm = (MINMAXINFO*)lp; mm->ptMinTrackSize.x = 980; mm->ptMinTrackSize.y = 640; return 0; }
-    case WM_TIMER: refreshQueue(); chatViewTick(); return 0;
+    case WM_TIMER: refreshQueue(); chatViewTick(); for (auto& pg : g_pages) updatePlayer(pg); return 0;
     case WM_SETCURSOR: {
         POINT pt; GetCursorPos(&pt); ScreenToClient(h, &pt);
         RECT sp = splitterRect();
@@ -787,6 +959,7 @@ LRESULT CALLBACK mainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (n->hwndFrom == ListView_GetHeader(g_qList) && (n->code == HDN_ENDTRACKW || n->code == HDN_ENDTRACKA)) { g_qColsCustom = true; saveQueueUi(); }
         if (n->hwndFrom == g_tab && n->code == TCN_SELCHANGE) showSelectedPage();
         if (n->hwndFrom == g_qList && n->code == NM_DBLCLK) onQueueCommand(IDC_QDETAILS);
+        if (n->hwndFrom == g_qList && n->code == LVN_COLUMNCLICK) onQueueColumnClick(((NMLISTVIEW*)lp)->iSubItem);
         return 0;
     }
     case WM_COMMAND: {
@@ -836,6 +1009,31 @@ LRESULT CALLBACK mainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 }
 
 // Mouse wheel over a tab's settings form scrolls the form, whichever child has focus.
+// Keyboard shortcuts of the Audio (music) tab: F2 generate, F3 play/stop the latest generated file, Shift+Delete delete the selected file
+bool routeKey(MSG& msg) {
+    if (msg.message != WM_KEYDOWN) return false;
+    if (msg.wParam != VK_F2 && msg.wParam != VK_F3 && msg.wParam != VK_DELETE) return false;
+    if (TabCtrl_GetCurSel(g_tab) != 1 + (int)Kind::Audio) return false;
+    if (msg.hwnd != g_main && !IsChild(g_main, msg.hwnd)) return false;
+    Page& p = g_pages[(int)Kind::Audio];
+    if (msg.wParam == VK_F2) { if (p.ready) onCreateClicked(p); return true; }
+    if (msg.wParam == VK_F3) {
+        if (p.outs.empty()) return true;
+        Player& pl = Player::get();
+        const std::string latest = p.outs[0].path;                       // the list is newest first
+        if (pl.current() == latest && pl.playing()) pl.stop();
+        else { selectOut(p, 0); pl.play(latest); }
+        updatePlayer(p);
+        return true;
+    }
+    // Shift+Delete: not while typing (there it means Cut)
+    if (!(GetKeyState(VK_SHIFT) & 0x8000)) return false;
+    wchar_t cls[32] = {}; GetClassNameW(GetFocus(), cls, 32);
+    if (!wcscmp(cls, L"Edit") || !wcscmp(cls, L"ComboBox")) return false;
+    onOutputAction(p, IDC_DELETE);
+    return true;
+}
+
 bool routeWheel(MSG& msg) {
     POINT pt; GetCursorPos(&pt);
     HWND w = WindowFromPoint(pt);
@@ -855,6 +1053,8 @@ bool routeWheel(MSG& msg) {
 int runGui(HINSTANCE inst) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     Settings::get().load();
+    if (crashGuardRecover(g_recovered)) Settings::get().setUiInt("safe_cpu", 1);          // the last run died inside a GPU job
+    Compute::setSafeMode(Settings::get().uiInt("safe_cpu", 0) != 0);
     sys::makeDirs(sys::modelsDir()); sys::makeDirs(sys::outputDir());
     JobQueue::get().start();
 
@@ -873,6 +1073,7 @@ int runGui(HINSTANCE inst) {
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         if (msg.message == WM_MOUSEWHEEL && routeWheel(msg)) continue;
+        if (msg.message == WM_KEYDOWN && routeKey(msg)) continue;
         if (IsDialogMessageW(w, &msg)) continue;
         TranslateMessage(&msg); DispatchMessageW(&msg);
     }

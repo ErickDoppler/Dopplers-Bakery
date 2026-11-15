@@ -1,5 +1,6 @@
 #include "core/queue.h"
 #include <algorithm>
+#include "util/crashlog.h"
 #include "util/sys.h"
 
 const char* stateName(JobState s) {
@@ -144,7 +145,7 @@ void JobQueue::loop() {
             if (stop_) return;
             cancelFlag_ = false;
             jobs_[pick].state = JobState::Running;
-            jobs_[pick].tStart = sys::now();
+            jobs_[pick].tStart = sys::now(); crashContext("job " + std::to_string(jobs_[pick].id) + " (" + kindTitle(jobs_[pick].kind) + "): " + jobs_[pick].title);
             jobs_[pick].status = "starting";
             job = jobs_[pick];
         }

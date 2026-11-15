@@ -12,6 +12,8 @@
 #include "krea2/sampling.h"
 #include "krea2/text_encoder.h"
 #include "krea2/vae.h"
+#include "core/settings.h"
+#include "util/crashlog.h"
 #include "util/image_io.h"
 #include "util/png.h"
 #include "util/sys.h"
@@ -20,6 +22,7 @@ namespace {
 // Models stay loaded between jobs while their files do not change.
 struct Engines {
     std::string tePath, ditKey, vaePath;
+    int bits = 8;                       // weight bits of the loaded models (4 = low-memory mode)
     Krea2TextEncoder te;
     Krea2DiT dit;
     Krea2Vae vae;
@@ -96,6 +99,32 @@ bool runImage(const Job& job, JobCtl& ctl, std::string& err) {
     std::string e2;
     if (!Compute::get().init(threads, e2)) { err = e2; return false; }
     auto t0 = std::chrono::steady_clock::now();
+    // if the app dies inside this job (driver problems on some GPUs) the next start notices and falls back to the CPU
+    struct Guard { bool on; ~Guard() { if (on) crashGuardEnd(); } } guard{Compute::get().usingGpu()};
+    if (guard.on) crashGuardBegin("image job " + std::to_string(job.id) + " on " + Compute::get().description());
+
+    // memory check: the weights of both models live in RAM (also with a GPU: it streams them); an 8-bit set is ~19 GB
+    int bits = g.bits;
+    if (!(g.te.loaded() && g.tePath == tePath && g.dit.loaded())) {
+        MEMORYSTATUSEX ms = {sizeof ms}; GlobalMemoryStatusEx(&ms);
+        const double need8 = (double)(sys::fileSize(ditPath) + sys::fileSize(tePath) + sys::fileSize(vaePath)) + 1.5e9, avail = (double)ms.ullAvailPhys;
+        const double need4 = (need8 - 1.5e9) * 0.56 + 1.5e9;
+        bits = 8;
+        if (const char* e = getenv("BAKERY_BITS")) bits = atoi(e) == 4 ? 4 : 8;
+        else if (need8 > avail * 0.92) bits = 4;
+        char msg[360];
+        if (bits == 4 && need4 > avail * 0.92 && !getenv("BAKERY_BITS")) {
+            snprintf(msg, sizeof msg, "Not enough free memory for the image models: they need about %.0f GB (%.0f GB in 4-bit low-memory mode) and %.0f GB are free. Close other programs, or use a PC with more RAM.",
+                     need8 / 1e9, need4 / 1e9, avail / 1e9);
+            logLine(msg); err = msg; return false;
+        }
+        if (bits == 4) {
+            snprintf(msg, sizeof msg, "low-memory mode: 4-bit weights (%.0f GB free, 8-bit needs %.0f GB)", avail / 1e9, need8 / 1e9);
+            logLine(msg); ctl.progress(0.0f, msg);
+        }
+        if (bits != g.bits) { g.te.unload(); g.dit.unload(); g.tePath.clear(); g.ditKey.clear(); g.bits = bits; }
+    }
+    g.te.quantBits = g.dit.quantBits = bits;
     if (!g.tokOk) { if (!g.tok.load("", err)) return false; g.tokOk = true; }
 
     if (!g.te.loaded() || g.tePath != tePath) {
@@ -217,5 +246,6 @@ bool runImage(const Job& job, JobCtl& ctl, std::string& err) {
     snprintf(done, sizeof done, "%dx%d in %.0f s (load %.0f s) on %s, seed %lld%s", OW, OH, secs(t0), loadSec, Compute::get().description().c_str(), seed,
              loraPath.empty() ? "" : (" , LoRA on " + std::to_string(g.dit.loraPatched) + " layers").c_str());
     ctl.progress(1.0f, done);
+    if (guard.on && Compute::safeMode()) { Compute::setSafeMode(false); Settings::get().setUiInt("safe_cpu", 0); }      // a GPU job worked again: leave the safe mode
     return true;
 }

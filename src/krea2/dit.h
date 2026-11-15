@@ -14,6 +14,7 @@ public:
               const std::string& loraPath = "", float loraStrength = 1.0f);   // LoRA is merged into the weights while loading
     int loraPatched = 0;
     void unload();
+    int quantBits = 8;                  // 8 (default) or 4 (low-memory mode); set before load()
     bool loaded() const { return backend_ != nullptr; }
 
     // latent: 16 x H x W (channel-major, H and W multiples of 2 are padded by the caller),

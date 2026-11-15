@@ -6,6 +6,7 @@
 #include <windows.h>
 #include "chat/agent.h"
 #include "core/cuda_libs.h"
+#include "gpu/compute.h"
 #include "web/server.h"
 #include "core/queue.h"
 #include "core/download.h"
@@ -195,6 +196,7 @@ int runSwitchTestCli() {
 int runCli(const std::vector<std::string>& a) {
     if (a.empty() || a[0] == "help" || a[0] == "--help" || a[0] == "-h") { usage(); return 0; }
     Settings::get().load();
+    { std::string what; if (crashGuardRecover(what)) Settings::get().setUiInt("safe_cpu", 1); Compute::setSafeMode(Settings::get().uiInt("safe_cpu", 0) != 0); }
     Settings::get().autoSelect();      // repairs empty or wrong model choices (checked by file content)
     sys::makeDirs(sys::modelsDir()); sys::makeDirs(sys::outputDir());
     if (a[0] == "models") return cmdModels(a);

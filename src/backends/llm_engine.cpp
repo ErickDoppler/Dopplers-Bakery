@@ -5,6 +5,7 @@
 #include <thread>
 #include "backends/engines.h"
 #include "llama.h"
+#include "util/crashlog.h"
 #include "util/sys.h"
 
 namespace {
@@ -15,7 +16,7 @@ struct ModelCache {
     llama_adapter_lora* lora = nullptr;
 } g_cache;
 
-void quietLog(ggml_log_level, const char*, void*) {}
+void quietLog(ggml_log_level level, const char* text, void*) { if (level >= GGML_LOG_LEVEL_WARN && text) logLine(std::string("[llama] ") + text); }      // quiet on screen, kept in bakery.log
 
 bool ensureModel(const std::string& path, const std::string& lora, JobCtl& ctl, std::string& err) {
     static bool inited = false;

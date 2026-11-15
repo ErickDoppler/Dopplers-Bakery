@@ -52,6 +52,7 @@ struct LoadJob { ggml_tensor* t; std::string name; int mode; };   // 0 fp8/bf16 
 bool Krea2DiT::load(const std::string& path, int threads, std::string& err, const std::function<void(float)>& progress,
                      const std::string& loraPath, float loraStrength) {
     unload();
+    const ggml_type qt = quantBits == 4 ? GGML_TYPE_Q4_0 : GGML_TYPE_Q8_0;      // 8 bit normally, 4 bit in low-memory mode
     threads_ = threads > 0 ? threads : 8;
     StFile* st = new StFile(); st_ = st;
     if (!st->open(path, err)) { unload(); return false; }
@@ -73,7 +74,7 @@ bool Krea2DiT::load(const std::string& path, int threads, std::string& err, cons
     auto mat = [&](const std::string& rel) -> ggml_tensor* {
         std::string n = P + rel; const StTensor* t = st->find(n);
         if (!t || t->shape.size() != 2) return fail(n);
-        ggml_type ty = t->dtype == "F8_E4M3" ? (getenv("BAKERY_DIT_F16") ? GGML_TYPE_F16 : GGML_TYPE_Q8_0) : (t->dtype == "BF16" ? GGML_TYPE_BF16 : GGML_TYPE_COUNT);
+        ggml_type ty = t->dtype == "F8_E4M3" ? (getenv("BAKERY_DIT_F16") ? GGML_TYPE_F16 : qt) : (t->dtype == "BF16" ? GGML_TYPE_BF16 : GGML_TYPE_COUNT);
         if (ty == GGML_TYPE_COUNT) return fail(n);
         ggml_tensor* g = ggml_new_tensor_2d(ctx_, ty, t->shape[1], t->shape[0]);
         ggml_set_name(g, n.c_str()); jobs.push_back({g, n, 0}); return g;
@@ -127,7 +128,7 @@ bool Krea2DiT::load(const std::string& path, int threads, std::string& err, cons
                     if (useLora) applyLora(lora, "model.diffusion_model." + j.name.substr(P.size()), f, j.t->ne[0], j.t->ne[1], loraStrength, loraPatched);
                     q.resize(ggml_nbytes(j.t));
                     if (j.t->type == GGML_TYPE_F16) ggml_fp32_to_fp16_row(f.data(), (ggml_fp16_t*)q.data(), f.size());
-                    else ggml_quantize_chunk(GGML_TYPE_Q8_0, f.data(), q.data(), 0, j.t->ne[1], j.t->ne[0], nullptr);
+                    else ggml_quantize_chunk(qt, f.data(), q.data(), 0, j.t->ne[1], j.t->ne[0], nullptr);
                     ggml_backend_tensor_set(j.t, q.data(), 0, q.size());
                 } else ggml_backend_tensor_set(j.t, t->data, 0, ggml_nbytes(j.t));
             } else {
@@ -139,7 +140,7 @@ bool Krea2DiT::load(const std::string& path, int threads, std::string& err, cons
             if (progress && d % 32 == 0) progress((float)d / jobs.size());
         }
     };
-    ggml_quantize_init(GGML_TYPE_Q8_0);
+    ggml_quantize_init(qt);
     std::vector<std::thread> pool;
     for (int i = 0; i < threads_; i++) pool.emplace_back(worker);
     for (auto& th : pool) th.join();

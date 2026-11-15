@@ -23,6 +23,7 @@ void Krea2TextEncoder::unload() {
 
 bool Krea2TextEncoder::load(const std::string& path, int threads, std::string& err, const std::function<void(float)>& progress) {
     unload();
+    const ggml_type qt = quantBits == 4 ? GGML_TYPE_Q4_0 : GGML_TYPE_Q8_0;      // 8 bit normally, 4 bit in low-memory mode
     threads_ = threads > 0 ? threads : 4;
     StFile* st = new StFile();
     st_ = st;
@@ -42,7 +43,7 @@ bool Krea2TextEncoder::load(const std::string& path, int threads, std::string& e
     };
     auto lin = [&](const std::string& n) -> ggml_tensor* {
         int64_t a, b; if (!shapeOf(n, a, b)) return nullptr;
-        ggml_tensor* t = ggml_new_tensor_2d(ctx_, GGML_TYPE_Q8_0, a, b);
+        ggml_tensor* t = ggml_new_tensor_2d(ctx_, qt, a, b);
         ggml_set_name(t, n.c_str()); jobs.push_back({t, n, true}); return t;
     };
     auto vec = [&](const std::string& n) -> ggml_tensor* {
@@ -81,14 +82,14 @@ bool Krea2TextEncoder::load(const std::string& path, int threads, std::string& e
             if (j.fp8) {
                 int64_t cols = j.t->ne[0], rows = j.t->ne[1];
                 q.resize(ggml_nbytes(j.t));
-                ggml_quantize_chunk(GGML_TYPE_Q8_0, f.data(), q.data(), 0, rows, cols, nullptr);
+                ggml_quantize_chunk(qt, f.data(), q.data(), 0, rows, cols, nullptr);
                 ggml_backend_tensor_set(j.t, q.data(), 0, q.size());
             } else ggml_backend_tensor_set(j.t, f.data(), 0, f.size() * sizeof(float));
             size_t d = ++done;
             if (progress && d % 16 == 0) progress((float)d / jobs.size());
         }
     };
-    ggml_quantize_init(GGML_TYPE_Q8_0);
+    ggml_quantize_init(qt);
     std::vector<std::thread> pool;
     for (int i = 0; i < threads_; i++) pool.emplace_back(worker);
     for (auto& th : pool) th.join();

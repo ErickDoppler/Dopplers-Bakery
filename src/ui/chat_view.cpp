@@ -7,13 +7,14 @@
 #include <vector>
 #include "chat/agent.h"
 #include "ui/modal.h"
+#include "ui/player.h"
 #include "util/image_io.h"
 #include "util/sys.h"
 #include "web/server.h"
 
 namespace {
 enum ItemKind { K_TEXT, K_IMAGE, K_AUDIO, K_NOTE, K_TYPING, K_EMPTY };
-enum HitId { H_NONE = 0, H_IMG, H_AUDIO, H_CHIPX, H_PLUS, H_VOICE, H_SEND, H_COPY };
+enum HitId { H_NONE = 0, H_IMG, H_AUDIO, H_CHIPX, H_PLUS, H_VOICE, H_SEND, H_COPY, H_SEEK };
 struct Line { int s, e; };
 struct Item { int kind = K_TEXT; bool user = false; int x = 0, y = 0, w = 0, h = 0; std::wstring text; std::string path; std::vector<Line> lines; int lineH = 0;
               bool err = false, info = false, canCopy = false; int textH = 0; };       // err: red status text; canCopy: small Copy button under a reply
@@ -31,7 +32,7 @@ std::vector<Item> g_items;
 std::vector<Hit> g_hits;                           // composer hits (client coordinates)
 std::vector<std::string> g_attached;
 std::map<std::string, Thumb> g_thumbs;
-std::string g_playing, g_sig;
+std::string g_sig;
 std::vector<ChatMsg> g_tr;
 std::string g_live, g_status;
 bool g_busy = false;
@@ -43,6 +44,7 @@ bool g_tracking = false;
 int g_selAi = -1, g_selAc = 0, g_selBi = -1, g_selBc = 0;
 bool g_selecting = false;
 POINT g_downPt = {};
+int g_seekIdx = -1;                                   // pill whose bar is being dragged
 int g_copiedIdx = -1, g_hotCopy = -1;           // item whose Copy button shows "Copied" / is under the mouse
 DWORD g_copiedAt = 0;
 
@@ -53,20 +55,17 @@ bool isImg(const std::string& p) { for (const char* e : {".png", ".jpg", ".jpeg"
 bool isAud(const std::string& p) { return ends(p, ".mp3") || ends(p, ".wav"); }
 bool inRect(const RECT& r, int x, int y) { return x >= r.left && x < r.right && y >= r.top && y < r.bottom; }
 
-// ------------------------------------------------------------------ sound
-void stopSound() { mciSendStringW(L"close bkchat", nullptr, 0, nullptr); g_playing.clear(); }
-void playSound(const std::string& path) {
-    bool same = g_playing == path;
-    stopSound();
-    if (same) return;
-    std::wstring cmd = L"open \"" + W(path) + L"\" type " + (ends(path, ".wav") ? L"waveaudio" : L"mpegvideo") + L" alias bkchat";
-    if (mciSendStringW(cmd.c_str(), nullptr, 0, nullptr) == 0) { mciSendStringW(L"play bkchat", nullptr, 0, nullptr); g_playing = path; }
+// ------------------------------------------------------------------ sound (the shared player: one thing plays at a time, in the chat or on a tab)
+void stopSound() { Player::get().release(); }
+void playSound(const std::string& path) {                          // pill button: play, or pause/resume the file that is loaded
+    Player& pl = Player::get();
+    if (pl.current() == path) pl.toggle(); else pl.play(path);
 }
-void checkSoundEnded() {
-    if (g_playing.empty()) return;
-    wchar_t mode[32] = {};
-    mciSendStringW(L"status bkchat mode", mode, 32, nullptr);
-    if (wcscmp(mode, L"playing") != 0) { stopSound(); InvalidateRect(g_view, nullptr, FALSE); }
+// click on the bar of a pill: jump there (starting the file first when it is not the one loaded)
+void seekSound(const std::string& path, double frac) {
+    Player& pl = Player::get();
+    if (pl.current() != path) pl.play(path);
+    pl.seek(frac);
 }
 
 // ------------------------------------------------------------------ pictures
@@ -204,7 +203,7 @@ void buildItems(HDC dc, int W_, int colX, int colW) {
                 it.w = std::max(40, (int)(tw * sc)); it.h = std::max(40, (int)(th * sc));
                 y += 8; add(it, user);
             } else if (isAud(f)) {
-                Item it; it.kind = K_AUDIO; it.path = f; it.w = std::min(300, colW); it.h = 46;
+                Item it; it.kind = K_AUDIO; it.path = f; it.w = std::min(340, colW); it.h = 58;
                 y += 8; add(it, user);
             }
         }
@@ -338,9 +337,11 @@ void paintItem(HDC dc, const Item& it, int yy) {
         break;
     }
     case K_AUDIO: {
-        bool playing = g_playing == it.path;
+        Player& pl = Player::get();
+        const bool mine = pl.current() == it.path;                      // this pill's file is the one loaded in the player
+        const bool playing = mine && pl.playing();
         fillRound(dc, r, cPanel, cLine, 23);
-        RECT cb = {r.left + 7, r.top + 7, r.left + 39, r.top + 39};
+        RECT cb = {r.left + 9, r.top + 11, r.left + 41, r.top + 43};
         fillCircle(dc, cb, cText);
         HBRUSH wb = CreateSolidBrush(RGB(255, 255, 255)); HPEN wp = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
         HGDIOBJ ob = SelectObject(dc, wb), op = SelectObject(dc, wp);
@@ -348,11 +349,28 @@ void paintItem(HDC dc, const Item& it, int yy) {
         if (playing) { Rectangle(dc, cx - 5, cy - 6, cx - 1, cy + 7); Rectangle(dc, cx + 2, cy - 6, cx + 6, cy + 7); }
         else { POINT tri[3] = {{cx - 4, cy - 7}, {cx - 4, cy + 7}, {cx + 7, cy}}; Polygon(dc, tri, 3); }
         SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(wb); DeleteObject(wp);
-        RECT tr = {r.left + 50, r.top, r.right - 12, r.bottom};
+        // name (top left), position "0:12 / 0:45" (top right), seek bar (bottom)
         std::wstring label = ends(it.path, ".wav") ? L"Voice / sound  •  " : L"Audio  •  ";
         label += W(fileOf(it.path));
+        std::wstring time = mine ? W(Player::timeText(pl.positionMs()) + " / " + Player::timeText(pl.lengthMs())) : L"";
         SetTextColor(dc, cText); SelectObject(dc, g_fs);
+        SIZE ts = {0, 0}; if (!time.empty()) GetTextExtentPoint32W(dc, time.c_str(), (int)time.size(), &ts);
+        RECT tr = {r.left + 52, r.top + 8, r.right - 16 - ts.cx - 8, r.top + 28};
         DrawTextW(dc, label.c_str(), -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        if (!time.empty()) { SetTextColor(dc, cMute); RECT tt = {r.right - 16 - ts.cx, r.top + 8, r.right - 16, r.top + 28}; DrawTextW(dc, time.c_str(), -1, &tt, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX); }
+        {
+            const int bx0 = r.left + 52, bx1 = r.right - 16, by = r.top + 40;
+            RECT track = {bx0, by - 2, bx1, by + 2};
+            HBRUSH tb = CreateSolidBrush(cLine); FillRect(dc, &track, tb); DeleteObject(tb);
+            long long len = pl.lengthMs();
+            if (mine && len > 0) {
+                double f = std::min(1.0, std::max(0.0, (double)pl.positionMs() / (double)len));
+                int px = bx0 + (int)((bx1 - bx0) * f);
+                RECT done = {bx0, by - 2, px, by + 2};
+                HBRUSH db = CreateSolidBrush(cText); FillRect(dc, &done, db); DeleteObject(db);
+                RECT knob = {px - 5, by - 5, px + 5, by + 5}; fillCircle(dc, knob, cText);
+            }
+        }
         break;
     }
     case K_TYPING:
@@ -488,6 +506,10 @@ Hit* hitAt(int x, int y, Hit& out) {
                 out = {{it.x, it.y + it.textH, it.x + 28, it.y + it.h}, H_COPY, (int)i, ""};
                 return &out;
             }
+            if (it.kind == K_AUDIO && x >= it.x + 52 && x < it.x + it.w - 16 && y + g_scroll >= it.y + 30 && y + g_scroll < it.y + 52) {      // the position bar of a pill
+                out = {{it.x + 52, it.y + 30, it.x + it.w - 16, it.y + 52}, H_SEEK, (int)i, it.path};
+                return &out;
+            }
             if ((it.kind == K_IMAGE || it.kind == K_AUDIO) && x >= it.x && x < it.x + it.w && y + g_scroll >= it.y && y + g_scroll < it.y + it.h) {
                 out = {{it.x, it.y, it.x + it.w, it.y + it.h}, it.kind == K_IMAGE ? H_IMG : H_AUDIO, (int)i, it.path};
                 return &out;
@@ -564,6 +586,14 @@ void contextMenu(int x, int y, POINT screen) {
     else if (cmd == 3) selectAll();
 }
 
+void seekFromX(int x) {                                                 // position of the dragged pill bar -> player
+    if (g_seekIdx < 0 || g_seekIdx >= (int)g_items.size()) return;
+    const Item& it = g_items[g_seekIdx];
+    double f = (double)(x - (it.x + 52)) / (double)std::max(1, it.w - 16 - 52);
+    seekSound(it.path, std::min(1.0, std::max(0.0, f)));
+    InvalidateRect(g_view, nullptr, FALSE);
+}
+
 LRESULT CALLBACK editProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
     if (m == WM_PASTE) { bool handled = false; pasteClipboardPicture(handled); if (handled) return 0; }
     if (m == WM_KEYDOWN && (wp == 'C' || wp == 'A') && (GetKeyState(VK_CONTROL) & 0x8000) && hasSelection()) {
@@ -612,6 +642,7 @@ LRESULT CALLBACK viewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSEMOVE: {
         int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+        if (g_seekIdx >= 0) { seekFromX(x); return 0; }                  // dragging the bar of a pill
         if (g_selecting) {
             int ti = nearestTextItem(y);
             if (ti >= 0) { g_selBi = ti; g_selBc = charAt(ti, x, y); InvalidateRect(h, nullptr, FALSE); }
@@ -634,6 +665,7 @@ LRESULT CALLBACK viewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_LBUTTONDOWN: {
         int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+        { Hit sh; Hit* sp = hitAt(x, y, sh); if (sp && sp->id == H_SEEK) { g_seekIdx = sp->idx; SetCapture(h); seekFromX(x); SetFocus(g_edit); return 0; } }
         int ti = textItemAt(x, y);
         if (ti >= 0) {
             g_selecting = true; SetCapture(h);
@@ -651,6 +683,7 @@ LRESULT CALLBACK viewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_LBUTTONUP: {
         int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+        if (g_seekIdx >= 0) { seekFromX(x); g_seekIdx = -1; ReleaseCapture(); return 0; }
         if (g_selecting) {
             g_selecting = false; ReleaseCapture();
             if (abs(x - g_downPt.x) < 3 && abs(y - g_downPt.y) < 3) clearSelection();
@@ -727,7 +760,7 @@ void chatViewTick() {
     ag.poll();
     std::string snd = ag.takeSpeechToPlay();
     if (!snd.empty() && ag.settings.voice && !WebServer::get().clientActive()) playSound(snd);      // the browser plays it when one is open
-    checkSoundEnded();
+    if (Player::get().loaded()) InvalidateRect(g_view, nullptr, FALSE);        // playing position of the pills
     if (g_copiedIdx >= 0 && GetTickCount() - g_copiedAt > 1600) { g_copiedIdx = -1; InvalidateRect(g_view, nullptr, FALSE); }
     g_busy = ag.busy(); g_status = g_busy ? ag.status() : ""; g_live = ag.live();
     auto tr = ag.transcript();

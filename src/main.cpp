@@ -4,9 +4,11 @@
 #include <cstdio>
 #include "cli/cli.h"
 #include "ui/ui.h"
+#include "util/crashlog.h"
 #include "util/sys.h"
 
 int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR, int) {
+    crashLogInstall();                                  // bakery.log, a readable message when the AI engine aborts
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argc <= 1) {

@@ -8,6 +8,7 @@
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
+#include "util/crashlog.h"
 
 struct Compute {
     static Compute& get();
@@ -15,6 +16,9 @@ struct Compute {
     static void probe();
     static bool hasCuda();
     static bool hasVulkan();
+    static bool onlyIntegratedGpu();                              // the only GPU is an integrated one (Intel / APU: shares the system RAM)
+    static void setSafeMode(bool on);                             // after a crash inside a GPU job: "auto" means CPU
+    static bool safeMode();
     // Longest image side the backend can render correctly: Vulkan renders noise above ~6500 DiT tokens (about 1280 px square), CUDA and CPU do not.
     static int imageSideLimit(const std::string& pref);          // "cuda", "vulkan" or "" (= the default backend)
 
