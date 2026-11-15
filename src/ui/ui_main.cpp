@@ -216,7 +216,11 @@ void layoutForm(Page& p) {
         if (c.label) uiPlace(c.label, c.x, c.ly - p.scroll, c.w, 18);
         uiPlace(c.ctl, c.x, c.cy - p.scroll, c.btn ? c.w - 34 : c.w, c.f->type == FT::Combo ? 260 : c.ch);
         if (c.btn) uiPlace(c.btn, c.x + c.w - 30, c.cy - p.scroll, 30, c.ch);
-        if (p.bExtend && !strcmp(c.f->key, "length")) uiPlace(p.bExtend, c.x + c.w - 100, c.ly - p.scroll - 3, 100, 22);       // right end of the length row
+        if (p.bExtend && !strcmp(c.f->key, "length")) {                   // Extend... sits right of the (shortened) trackbar
+            const int bw = 100;
+            uiPlace(c.ctl, c.x, c.cy - p.scroll, c.w - bw - 8, c.ch);
+            uiPlace(p.bExtend, c.x + c.w - bw, c.cy - p.scroll, bw, 24);
+        }
     }
 }
 
