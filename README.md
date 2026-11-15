@@ -3,7 +3,11 @@
 An offline studio for **chat, images, music, sound effects and speech** on your own Windows PC.
 A native C++ app (ggml / llama.cpp), no Python, no ComfyUI, no cloud. Talk to the assistant and it makes pictures, audio and a spoken reply; edit your own pictures; use the same chat from a browser.
 
-![Dopplers Bakery: the chat made a picture and music, the queue on the right](docs/screenshot.png)
+![Chat: one message made a picture and music; the queue with speed, size and time on the right](docs/screenshot-chat.png)
+
+![Audio tab: player with position, Extend... next to the length trackbar, F2 / F3 / Shift+Del shortcuts](docs/screenshot-audio.png)
+
+![Text to image tab with image-to-image, size sliders and the results list](docs/screenshot-image.png)
 
 > ## ⚠️ Read this first: the app downloads gigabytes of data
 > The program itself is small (~70 MB), but it **does not contain any AI models**. To work it needs about **36 GB** of model files
