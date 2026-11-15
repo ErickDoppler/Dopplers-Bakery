@@ -274,3 +274,34 @@ bool showDownloadDialog(HWND parent, bool firstLaunch) {
     runModal(d, parent, firstLaunch ? "Welcome - download models" : "Download models", 700, 392);
     return d.any;
 }
+
+// =============================================================== number input
+namespace {
+struct NumDlg : Modal {
+    std::string prompt; int initial = 0, lo = 0, hi = 0, value = 0; bool ok = false;
+    HWND edit = nullptr;
+    void onCreate() override {
+        const int W = 380;
+        uiPlace(uiMake(hwnd, L"STATIC", prompt, SS_LEFT), 14, 12, W - 28, 52);
+        edit = uiMake(hwnd, L"EDIT", std::to_string(initial), ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP, 10, WS_EX_CLIENTEDGE);
+        uiPlace(edit, 14, 68, 120, 26);
+        uiPlace(uiMake(hwnd, L"BUTTON", "OK", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK), W - 200, 108, 90, 28);
+        uiPlace(uiMake(hwnd, L"BUTTON", "Cancel", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL), W - 104, 108, 90, 28);
+        SetFocus(edit); SendMessageW(edit, EM_SETSEL, 0, -1);
+    }
+    void onCommand(int id, int) override {
+        if (id == IDOK) {
+            int v = atoi(uiText(edit).c_str());
+            if (v < lo || v > hi) { MessageBoxW(hwnd, sys::widen("Enter a number from " + std::to_string(lo) + " to " + std::to_string(hi) + ".").c_str(), L"Dopplers Bakery", MB_OK | MB_ICONINFORMATION); return; }
+            value = v; ok = true; close();
+        } else if (id == IDCANCEL) close();
+    }
+};
+}  // namespace
+
+bool askNumber(HWND parent, const std::string& title, const std::string& prompt, int initial, int lo, int hi, int& out) {
+    NumDlg d; d.prompt = prompt; d.initial = std::min(std::max(initial, lo), hi); d.lo = lo; d.hi = hi;
+    runModal(d, parent, title, 380, 150);
+    if (d.ok) out = d.value;
+    return d.ok;
+}

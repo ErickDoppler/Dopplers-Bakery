@@ -45,6 +45,7 @@ private:
     std::string registerImage(const std::string& path);           // -> "img3"
     std::string imagePath(const std::string& id);                  // "" if unknown; "last" = newest picture
     std::vector<std::string> imgs_;                                // attached and generated pictures, id = "img" + (index+1)
+    std::string lastUser_;                                         // the user text of the current turn (to see whether a length was asked for)
     int startLlm(std::string& err);
     std::string systemPrompt();
     bool launchCall(const Call& c, std::vector<Pending>& pending, Json& results);

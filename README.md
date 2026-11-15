@@ -13,11 +13,12 @@ A native C++ app (ggml / llama.cpp), no Python, no ComfyUI, no cloud. Talk to th
 
 ## Features
 - **Chat** (first tab): ChatGPT-style. Ask for *"a lighthouse at sunset"*, *"20 seconds of calm piano"*, *"a door creaking"*; the assistant calls the image / audio / speech tools and answers (optionally out loud). Text, including error messages, can be selected and copied; every reply has a **Copy** button.
+- **Audio in chat has no length limit of its own**: say "2 minutes" or "45 seconds" and you get exactly that (up to the model's 380 s, with a note if more is asked); if you give no length the app picks a random one: songs 90-320 s, one-shots 4-30 s, sound effects 1-10 s.
 - **Pictures in chat**: attach with the **+** button, drag & drop, or Ctrl+V; then say how to change it (image-to-image).
 - **Chat in the browser**: the same chat on `http://127.0.0.1:8787` (menu *Web*), images and sound play in the page. *Share on the local network* is opt-in and protected by a secret key in the link.
 - **Tabs**: LLM (Qwen), TTS (Qwen3-TTS, incl. voice cloning with the Base model), Text to image (Krea 2, image-to-image), Audio (Stable Audio 3, MP3/WAV).
 - Job **queue** with columns `#` | `Tab` | `Progress` (percent, then Done / Failed) | `Speed / size / length` (tokens per second, image size or audio length) | `Time`; click a job to see its prompt and details. The title counts the jobs (running / waiting / done), click a column header to sort, the list keeps its scroll position and follows the running job. Pause, cancel, reorder; hide the panel, drag its edge to resize it, resize its columns.
-- **Audio tab**: a player under the list (Prev / Play-Pause / Stop / Next, position bar, name and time of what is playing, stop works even after the list was cleared) and keyboard shortcuts: **F2** generate, **F3** play / stop the newest result, **Shift+Delete** delete the selected result and its file (to the Recycle Bin). Audio in the chat has a position bar you can drag.
+- **Audio tab**: the length trackbar goes up to 5 minutes for every kind of sound, and the **Extend...** button next to it opens a number field for any length up to what the model can make (380 s). A player under the list (Prev / Play-Pause / Stop / Next, position bar, name and time of what is playing, stop works even after the list was cleared) and keyboard shortcuts: **F2** generate, **F3** play / stop the newest result, **Shift+Delete** delete the selected result and its file (to the Recycle Bin). Audio in the chat has a position bar you can drag.
 - Command line mode; models are plain files you can reuse from ComfyUI folders.
 
 ## Requirements

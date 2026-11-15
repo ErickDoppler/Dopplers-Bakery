@@ -25,7 +25,7 @@
 namespace {
 
 enum {
-    IDC_CREATE = 1001, IDC_SETTINGS, IDC_OUTLIST, IDC_PREVIEW, IDC_COPY, IDC_DELETE, IDC_PL_PREV, IDC_PL_PLAY, IDC_PL_STOP, IDC_PL_NEXT, IDC_PL_TRK,
+    IDC_CREATE = 1001, IDC_SETTINGS, IDC_OUTLIST, IDC_PREVIEW, IDC_COPY, IDC_DELETE, IDC_PL_PREV, IDC_PL_PLAY, IDC_PL_STOP, IDC_PL_NEXT, IDC_PL_TRK, IDC_EXTEND,
     IDC_FIELD0 = 2000, IDC_BROWSE0 = 2500,
     IDC_QLIST = 3001, IDC_QUP, IDC_QDOWN, IDC_QREMOVE, IDC_QPAUSE, IDC_QCANCEL, IDC_QCLEAR, IDC_QDETAILS, IDC_QPROG, IDC_QSTAT, IDC_QTOGGLE, IDC_QDETAIL,
 
@@ -38,6 +38,7 @@ const int kQueueMinW = 340;
 struct FieldCtl {
     const Field* f; HWND label = nullptr, ctl = nullptr, btn = nullptr;
     int x = 0, ly = 0, cy = 0, w = 0, ch = 0;      // logical layout (before scrolling)
+    int ext = 0;                                   // value above the trackbar range (Audio length set with Extend...), 0 = none
 };
 struct OutItem { int jobId; std::string path, text, when; };
 
@@ -54,6 +55,7 @@ struct Page {
     // audio tabs: a small player under the list (Prev / Play-Pause / Stop / Next, position bar, what is playing)
     HWND bPrev = nullptr, bPlay = nullptr, bStop = nullptr, bNext = nullptr, trk = nullptr, lblNow = nullptr;
     bool seeking = false;
+    HWND bExtend = nullptr;              // Audio tab: "Extend..." next to the length trackbar (lengths beyond five minutes)
 };
 inline bool pagePlays(const Page& p) { return p.trk != nullptr; }
 
@@ -116,7 +118,7 @@ Json readForm(Page& p) {
             j[f.key] = n; break;
         }
         case FT::Check: j[f.key] = SendMessageW(c.ctl, BM_GETCHECK, 0, 0) == BST_CHECKED; break;
-        case FT::Slider: j[f.key] = (double)SendMessageW(c.ctl, TBM_GETPOS, 0, 0); break;
+        case FT::Slider: j[f.key] = c.ext > 0 ? (double)c.ext : (double)SendMessageW(c.ctl, TBM_GETPOS, 0, 0); break;
         case FT::Int: case FT::Float: {
             std::string s = uiText(c.ctl); for (auto& ch : s) if (ch == ',') ch = '.';
             double v = s.empty() ? f.def : atof(s.c_str());
@@ -130,8 +132,8 @@ Json readForm(Page& p) {
 }
 
 void sliderLabel(FieldCtl& c) {
-    int v = (int)SendMessageW(c.ctl, TBM_GETPOS, 0, 0);
-    uiSetText(c.label, std::string(c.f->label) + ": " + std::to_string(v));
+    int v = c.ext > 0 ? c.ext : (int)SendMessageW(c.ctl, TBM_GETPOS, 0, 0);
+    uiSetText(c.label, std::string(c.f->label) + ": " + std::to_string(v) + (c.ext > 0 ? "  (extended beyond the trackbar)" : ""));
 }
 
 // Width/Height can only go as high as the chosen backend renders correctly (Vulkan 1264 px, CUDA much more).
@@ -163,7 +165,11 @@ void writeForm(Page& p, const Json& saved) {
             uiSetText(c.ctl, n); break;
         }
         case FT::Check: SendMessageW(c.ctl, BM_SETCHECK, v.isNull() ? f.def != 0 : v.boolean(), 0); break;
-        case FT::Slider: SendMessageW(c.ctl, TBM_SETPOS, TRUE, (LPARAM)(v.isNull() ? f.def : v.num())); sliderLabel(c); break;
+        case FT::Slider: {
+            double want = v.isNull() ? f.def : v.num();
+            c.ext = (!strcmp(f.key, "length") && want > f.mx) ? (int)want : 0;                 // an extended Audio length survives a restart
+            SendMessageW(c.ctl, TBM_SETPOS, TRUE, (LPARAM)(c.ext > 0 ? f.mx : want)); sliderLabel(c); break;
+        }
         case FT::Int: uiSetText(c.ctl, std::to_string((long long)std::llround(v.isNull() ? f.def : v.num()))); break;
         case FT::Float: uiSetText(c.ctl, fmtNum(v.isNull() ? f.def : v.num())); break;
         }
@@ -210,6 +216,7 @@ void layoutForm(Page& p) {
         if (c.label) uiPlace(c.label, c.x, c.ly - p.scroll, c.w, 18);
         uiPlace(c.ctl, c.x, c.cy - p.scroll, c.btn ? c.w - 34 : c.w, c.f->type == FT::Combo ? 260 : c.ch);
         if (c.btn) uiPlace(c.btn, c.x + c.w - 30, c.cy - p.scroll, 30, c.ch);
+        if (p.bExtend && !strcmp(c.f->key, "length")) uiPlace(p.bExtend, c.x + c.w - 100, c.ly - p.scroll - 3, 100, 22);       // right end of the length row
     }
 }
 
@@ -389,6 +396,20 @@ LRESULT CALLBACK pageProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             break;
         case IDC_SETTINGS: if (showModelSettings(g_main, p->kind)) refreshReady(*p); return 0;
         case IDC_PREVIEW: case IDC_COPY: case IDC_DELETE: onOutputAction(*p, LOWORD(wp)); return 0;
+        case IDC_EXTEND:                                                // lengths beyond the five-minute trackbar, up to what the model can make
+            for (auto& c : p->fc) if (!strcmp(c.f->key, "length")) {
+                int cur = c.ext > 0 ? c.ext : (int)SendMessageW(c.ctl, TBM_GETPOS, 0, 0), v = 0;
+                if (askNumber(g_main, "Extend the length",
+                              "Length in seconds. The trackbar goes up to " + std::to_string(kAudioSliderMax) + " s (5 minutes); the audio model can make up to " +
+                              std::to_string(kAudioModelMax) + " s (" + std::to_string(kAudioModelMax / 60) + " min " + std::to_string(kAudioModelMax % 60) + " s). Enter the length you want:",
+                              cur, 1, kAudioModelMax, v)) {
+                    c.ext = v > kAudioSliderMax ? v : 0;
+                    SendMessageW(c.ctl, TBM_SETPOS, TRUE, std::min(v, kAudioSliderMax));
+                    sliderLabel(c);
+                }
+                RedrawWindow(p->form, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);       // the dialog sat on top of the form
+            }
+            return 0;
         case IDC_PL_PREV: playerStep(*p, -1); updatePlayer(*p); return 0;
         case IDC_PL_NEXT: playerStep(*p, +1); updatePlayer(*p); return 0;
         case IDC_PL_PLAY: playerToggle(*p); updatePlayer(*p); return 0;
@@ -430,7 +451,7 @@ LRESULT CALLBACK formProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         p->scroll = pos; layoutForm(*p); return 0;
     }
     case WM_HSCROLL:       // trackbars live in the form
-        for (auto& c : p->fc) if (c.ctl == (HWND)lp && c.f->type == FT::Slider) sliderLabel(c);
+        for (auto& c : p->fc) if (c.ctl == (HWND)lp && c.f->type == FT::Slider) { c.ext = 0; sliderLabel(c); }      // moving the trackbar ends an extended length
         return 0;
     case WM_DRAWITEM:
         if (wp == IDC_CREATE) { drawCreateButton((DRAWITEMSTRUCT*)lp); return TRUE; }
@@ -477,6 +498,7 @@ void buildPage(Page& p, Kind kind) {
         }
         p.fc.push_back(c);
     }
+    if (kind == Kind::Audio) p.bExtend = uiMake(p.form, L"BUTTON", "Extend...", BS_PUSHBUTTON | WS_TABSTOP, IDC_EXTEND);
     p.bCreate = uiMake(p.form, L"BUTTON", kind == Kind::Audio ? "Create  (F2)" : "Create", BS_OWNERDRAW | WS_TABSTOP, IDC_CREATE);
     SetWindowSubclass(p.bCreate, hoverProc, 1, 0);
     p.bSettings = uiMake(p.form, L"BUTTON", "Model settings...", BS_PUSHBUTTON | WS_TABSTOP, IDC_SETTINGS);

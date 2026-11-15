@@ -9,6 +9,7 @@
 #include "audio/t5gemma.h"
 #include <windows.h>
 #include "backends/engines.h"
+#include "core/forms.h"
 #include "core/settings.h"
 #include "gpu/compute.h"
 #include "krea2/sampling.h"
@@ -92,7 +93,7 @@ bool runAudio(const Job& job, JobCtl& ctl, std::string& err) {
     if (a == std::string::npos) { err = "Prompt is empty."; return false; }
     prompt = prompt.substr(a, prompt.find_last_not_of(" \r\n\t") - a + 1);
 
-    const double seconds = std::min(std::max(p.num("length", 60), 1.0), 380.0);
+    const double seconds = std::min(std::max(p.num("length", 60), 1.0), (double)kAudioModelMax);
     { char b[32]; snprintf(b, sizeof b, "%.0f s", seconds); ctl.info(b); }
     const int T = std::max(2, (int)std::lround(seconds * SaVae::kSampleRate / SaVae::kSamplesPerLatent));
     const float secondsTotal = (float)(int)(T / 10.7666);                     // what the conditioner is given (ComfyUI: int(T / 10.7666))

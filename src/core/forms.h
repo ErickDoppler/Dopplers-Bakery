@@ -8,6 +8,9 @@
 
 enum class FT { Text, Multi, Int, Float, Slider, Combo, Check, File };
 
+constexpr int kAudioSliderMax = 300;      // Audio tab: the length trackbar goes up to five minutes
+constexpr int kAudioModelMax = 380;      // the longest clip the audio model can make (Extend... on the Audio tab; no other limit in the chat)
+
 struct Field {
     const char* key;
     const char* label;

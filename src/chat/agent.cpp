@@ -1,5 +1,6 @@
 #include "chat/agent.h"
 #include <algorithm>
+#include <random>
 #include <cmath>
 #include "core/forms.h"
 #include "core/queue.h"
@@ -28,6 +29,22 @@ std::string hideToolCalls(const std::string& s) {
 }
 
 int clampInt(double v, int lo, int hi) { return (int)std::min<double>(hi, std::max<double>(lo, std::llround(v))); }
+
+// Did the user actually ask for a length ("30 seconds", "2 min", "a minute", "40 секунд", "3 хвилини")? The model likes to invent one otherwise.
+bool userAskedForLength(const std::string& text) {
+    std::string l; for (char c : text) l += (char)tolower((unsigned char)c);
+    for (const char* w : {"second", "minute", "hour", "секунд", "хвилин", "годин", "довш", "коротш", "longer", "shorter", "long"}) if (l.find(w) != std::string::npos) return true;
+    for (size_t i = 0; i < l.size(); i++) {                      // "30s", "2 min", "45 sec", "2m", "30 с", "2 хв"
+        if (!isdigit((unsigned char)l[i])) continue;
+        size_t j = i; while (j < l.size() && (isdigit((unsigned char)l[j]) || l[j] == '.' || l[j] == ',')) j++;
+        while (j < l.size() && (l[j] == ' ' || l[j] == '-')) j++;
+        const char* units[] = {"sec", "min", "s ", "s,", "s.", "m ", "m,", "m.", "сек", "хв", "с ", "с,", "с."};
+        std::string rest = l.substr(j) + " ";
+        for (const char* u : units) if (rest.compare(0, strlen(u), u) == 0) return true;
+        i = j;
+    }
+    return false;
+}
 // the chat always uses CUDA when its libraries are installed (any size), otherwise Vulkan (capped)
 std::string chatBackend() {
     if (Compute::safeMode()) return "cpu";                             // the last GPU job crashed the app
@@ -66,8 +83,8 @@ std::string ChatAgent::systemPrompt() {
              "image (optional: an id such as \"img1\" from an attached or earlier made picture, or \"last\"; the picture is edited instead of drawing from scratch - then prompt must describe the WHOLE desired result), "
              "strength (optional, 0.2-1.0, how much to change the input image, default 0.6; 0.3 small tweak, 0.8 big change).\n";
     if (Settings::get().tabReady(Kind::Audio, &why))
-        s += std::to_string(++n) + ". generate_audio - arguments: prompt (English), kind (\"music\", \"sfx\", \"instrument\" or \"one_shot\"), "
-             "seconds (integer, exactly the length the user asked for converted to seconds, e.g. 2 minutes = 120; allowed: music 4-300, instrument 4-30, sfx 1-15, one_shot 1-6; if the user gives no length use 60 for music).\n";
+        s += std::to_string(++n) + ". generate_audio - arguments: prompt (English), kind (\"music\" = a song or track; \"sfx\" = a sound effect or ambience such as a door creaking, rain, an explosion, footsteps; \"instrument\" = one instrument playing a short phrase or loop; \"one_shot\" = one single hit or note such as a drum hit, a stinger or a sample), "
+             "seconds (integer, exactly the length the user asked for converted to seconds, e.g. 2 minutes = 120, any length up to 380 is possible; ONLY include seconds when the user states a length, otherwise leave the argument out and the app picks a fitting random length).\n";
     if (Settings::get().tabReady(Kind::TTS, &why))
         s += std::to_string(++n) + ". speak - arguments: text (string); reads exactly that text aloud.\n";
     if (n > 0 && chatImageLimit() < 2048)
@@ -97,6 +114,7 @@ bool ChatAgent::send(const std::string& userText, const std::vector<std::string>
     if (t.empty() && !images.empty()) t = "(I attached a picture.)";
     if (t.empty()) { err = "Message is empty."; return false; }
     std::string shownText = t;
+    lastUser_ = t;
     if (!images.empty()) {
         t += "\n[Attached pictures:";
         for (auto& f : images) t += " " + registerImage(f) + " (" + f.substr(f.find_last_of("\\/") + 1) + ")";
@@ -165,19 +183,24 @@ bool ChatAgent::launchCall(const Call& c, std::vector<Pending>& pending, Json& r
         if (!Settings::get().tabReady(Kind::Audio, &why)) return fail("audio generation is not set up: " + why);
         std::string prompt = trim(c.args.str("prompt"));
         if (prompt.empty()) return fail("missing prompt");
-        std::string kind = c.args.str("kind", "music"), mode = "Music"; int def = 60, lo = 4, hi = 300;
-        if (kind == "sfx") { mode = "SFX"; def = 5; lo = 1; hi = 15; }
-        else if (kind == "instrument") { mode = "Instrument"; def = 12; lo = 4; hi = 30; }
-        else if (kind == "one_shot" || kind == "one-shot") { mode = "One-shot"; def = 2; lo = 1; hi = 6; }
+        std::string kind = c.args.str("kind", "music"), mode = "Music";
+        int rlo = 90, rhi = 320;                           // no length requested: a random one by kind (songs 90-320 s, one-shots 4-30 s, sound effects 1-10 s)
+        if (kind == "sfx") { mode = "SFX"; rlo = 1; rhi = 10; }
+        else if (kind == "instrument") { mode = "Instrument"; rlo = 8; rhi = 30; }
+        else if (kind == "one_shot" || kind == "one-shot") { mode = "One-shot"; rlo = 4; rhi = 30; }
+        const int lo = 1, hi = kAudioModelMax;            // the chat has no limits of its own: only what the audio model itself can make
         Json form = Json::object();
-        const double asked = c.args.num("seconds", def);
+        static std::mt19937 rng{std::random_device{}()};
+        // the model's own number counts only when the user really asked for a length; otherwise a random one by kind
+        const bool given = userAskedForLength(lastUser_) && c.args.has("seconds") && c.args.get("seconds").t != Json::Null && c.args.num("seconds", 0) > 0;
+        const double asked = given ? c.args.num("seconds", 0) : (double)std::uniform_int_distribution<int>(rlo, rhi)(rng);
         const int secs = clampInt(asked, lo, hi);
         form["prompt"] = prompt; form["mode"] = mode; form["length"] = secs;
         form["enhance"] = true; form["format"] = "mp3"; form["seed"] = -1; form["backend"] = chatBackend();
         std::string lenNote;
         if ((int)std::llround(asked) != secs)            // outside what this kind of audio allows: say so instead of silently changing it
             lenNote = "The audio was made " + std::to_string(secs) + " s long instead of the requested " + std::to_string((int)std::llround(asked)) +
-                      " s (the limit for this kind of audio is " + std::to_string(lo) + "-" + std::to_string(hi) + " s).";
+                      " s (the audio model cannot make a clip longer than " + std::to_string(hi) + " s).";
         int id = JobQueue::get().add(Kind::Audio, makeJobParams(Kind::Audio, form), "chat: " + jobTitle(Kind::Audio, form));
         pending.push_back({id, c.name, lenNote});
         if (!lenNote.empty()) transcript_.push_back({"info", lenNote, {}});
