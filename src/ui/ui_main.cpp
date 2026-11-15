@@ -262,6 +262,7 @@ void refreshReady(Page& p) {
 }
 
 // ----------------------------------------------------------------- outputs list
+int outIndexOf(const Page& p, const std::string& path);
 void refreshOutputs(Page& p) {
     auto jobs = JobQueue::get().snapshot();
     std::vector<OutItem> items;
@@ -276,8 +277,11 @@ void refreshOutputs(Page& p) {
         }
     }
     if (sig == p.sig) return;
+    // what was selected (by file, the list is newest first so row numbers shift) and which file was the newest before
+    int selRow = ListView_GetNextItem(p.list, -1, LVNI_SELECTED);
+    const std::string selPath = selRow >= 0 && selRow < (int)p.outs.size() ? p.outs[selRow].path : std::string();
+    const std::string oldNewest = p.outs.empty() ? std::string() : p.outs[0].path;
     p.sig = sig; p.outs = items;
-    int sel = ListView_GetNextItem(p.list, -1, LVNI_SELECTED);
     ListView_DeleteAllItems(p.list);
     for (size_t i = 0; i < items.size(); i++) {
         LVITEMW it = {}; it.mask = LVIF_TEXT; it.iItem = (int)i;
@@ -288,7 +292,11 @@ void refreshOutputs(Page& p) {
         if (d.size() > 160) d.resize(160);
         std::wstring wd = sys::widen(d); ListView_SetItemText(p.list, (int)i, 1, &wd[0]);
     }
-    if (sel >= 0 && sel < (int)items.size()) ListView_SetItemState(p.list, sel, LVIS_SELECTED, LVIS_SELECTED);
+    // a freshly generated result becomes the selected one (so Play / Preview / Copy / Delete act on it); otherwise the selection stays on its file
+    int want = -1;
+    if (!items.empty() && items[0].path != oldNewest) want = 0;
+    else if (!selPath.empty()) want = outIndexOf(p, selPath);
+    if (want >= 0) { ListView_SetItemState(p.list, want, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED); ListView_EnsureVisible(p.list, want, FALSE); }
 }
 
 bool isAudio(Kind k) { return k == Kind::TTS || k == Kind::Audio; }
@@ -320,12 +328,16 @@ void playerStep(Page& p, int dir) {                  // previous / next file of 
     selectOut(p, n);
     pl.play(p.outs[n].path);
 }
-void playerToggle(Page& p) {                         // Play/Pause: the loaded file, otherwise the selected one, otherwise the newest
+void playerToggle(Page& p) {                         // Play/Pause on the file selected in the list (the newest result after a generation)
     Player& pl = Player::get();
-    if (pl.loaded()) { pl.toggle(); return; }
     int sel = ListView_GetNextItem(p.list, -1, LVNI_SELECTED);
-    if (sel < 0) sel = 0;
-    if (sel < (int)p.outs.size()) { selectOut(p, sel); pl.play(p.outs[sel].path); }
+    if (sel < 0 && !p.outs.empty()) sel = 0;
+    if (sel >= 0 && sel < (int)p.outs.size() && p.outs[sel].path != pl.current()) {      // another file than the loaded one: start the selected one
+        selectOut(p, sel);
+        pl.play(p.outs[sel].path);
+        return;
+    }
+    if (pl.loaded()) pl.toggle();
 }
 void updatePlayer(Page& p) {
     if (!pagePlays(p)) return;
