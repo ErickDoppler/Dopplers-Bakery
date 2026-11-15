@@ -193,6 +193,20 @@ ggml_tensor* swiglu(ggml_context* c, const Krea2DiT::Blk& b, ggml_tensor* h) {
     return ggml_mul_mat(c, b.md, m);
 }
 
+// the same MLP over slices of tokens: the 16384-wide intermediates are only chunk x 16384 instead of N x 16384 (a big part of the GPU memory use)
+ggml_tensor* swigluChunked(ggml_context* c, const Krea2DiT::Blk& b, ggml_tensor* h, int chunk) {
+    const int64_t N = h->ne[1];
+    if (chunk <= 0 || N <= chunk) return swiglu(c, b, h);
+    ggml_tensor* out = nullptr;
+    for (int64_t s = 0; s < N; s += chunk) {
+        const int64_t n = std::min<int64_t>(chunk, N - s);
+        ggml_tensor* part = ggml_view_2d(c, h, h->ne[0], n, h->nb[1], (size_t)s * h->nb[1]);
+        ggml_tensor* o = swiglu(c, b, part);
+        out = out ? ggml_concat(c, out, o, 1) : o;
+    }
+    return out;
+}
+
 // text-fusion block: plain pre-norm residual block, no modulation
 ggml_tensor* fusionBlock(ggml_context* c, const Krea2DiT::Blk& b, ggml_tensor* x) {
     x = ggml_add(c, x, attention(c, b, ggml_mul(c, ggml_rms_norm(c, x, 1e-5f), b.pre), Krea2DiT::kTxtHeads, Krea2DiT::kTxtHeads, nullptr, nullptr));
@@ -203,10 +217,12 @@ ggml_tensor* fusionBlock(ggml_context* c, const Krea2DiT::Blk& b, ggml_tensor* x
 bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sigma,
                        const std::vector<float>& ctx, int seq, std::vector<float>& out, std::string& err) {
     if (!loaded()) { err = "DiT not loaded"; return false; }
+    static const bool simulateFull = getenv("BAKERY_FAIL_GRAPH") != nullptr;      // test hook: pretend the GPU cannot hold the graph
+    if (simulateFull && Compute::get().usingGpu()) { err = "cannot allocate DiT graph"; return false; }
     if (H % 2 || W % 2) { err = "latent size must be even"; return false; }
     const int hp = H / 2, wp = W / 2, nImg = hp * wp, N = seq + nImg;
 
-    const size_t nodes = 6144;
+    const size_t nodes = mlpChunk > 0 ? 24576 : 6144;                     // chunked MLPs need more graph nodes
     std::vector<uint8_t> meta(ggml_tensor_overhead() * nodes + ggml_graph_overhead_custom(nodes, false) + (1 << 20));
     ggml_init_params ip = {meta.size(), meta.data(), true};
     ggml_context* c = ggml_init(ip);
@@ -252,7 +268,7 @@ bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sig
         x = ggml_add(c, x, ggml_mul(c, attention(c, b, ggml_reshape_3d(c, h, kDim, N, 1), kHeads, kKvHeads, cosIn, sinIn), preG));
         h = ggml_mul(c, ggml_rms_norm(c, x, 1e-5f), b.post);
         h = ggml_add(c, ggml_mul(c, h, ggml_scale_bias(c, postS, 1.0f, 1.0f)), postH);
-        x = ggml_add(c, x, ggml_mul(c, swiglu(c, b, h), postG));
+        x = ggml_add(c, x, ggml_mul(c, swigluChunked(c, b, h, mlpChunk), postG));
         if ((debug || statsOn) && (i <= 1 || i % 4 == 3)) { static std::vector<std::string> names; names.push_back("blk" + std::to_string(i)); tap(names.back().c_str(), x); }
     }
 

@@ -15,6 +15,7 @@ public:
     int loraPatched = 0;
     void unload();
     int quantBits = 8;                  // 8 (default) or 4 (low-memory mode); set before load()
+    int mlpChunk = 0;                   // > 0: run the MLP of the image blocks in chunks of this many tokens (small GPU memory)
     bool loaded() const { return backend_ != nullptr; }
 
     // latent: 16 x H x W (channel-major, H and W multiples of 2 are padded by the caller),

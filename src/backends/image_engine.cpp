@@ -125,6 +125,11 @@ bool runImage(const Job& job, JobCtl& ctl, std::string& err) {
         if (bits != g.bits) { g.te.unload(); g.dit.unload(); g.tePath.clear(); g.ditKey.clear(); g.bits = bits; }
     }
     g.te.quantBits = g.dit.quantBits = bits;
+    // small or shared GPU memory (integrated graphics): MLP in slices and smaller VAE tiles keep the graphs small enough to allocate
+    const bool smallGpu = Compute::get().usingGpu() && (Compute::get().gpuIntegrated || Compute::get().gpuFreeMB() < 6000 || getenv("BAKERY_LOWGPU"));
+    g.dit.mlpChunk = smallGpu ? 512 : 0;
+    const int vaeTile = smallGpu ? 32 * 32 : 64 * 64;
+    if (smallGpu) logLine("low GPU memory: MLP chunks of 512 tokens, VAE tiles of 32x32 (free " + std::to_string(Compute::get().gpuFreeMB()) + " MB)");
     if (!g.tokOk) { if (!g.tok.load("", err)) return false; g.tokOk = true; }
 
     if (!g.te.loaded() || g.tePath != tePath) {
@@ -231,7 +236,7 @@ bool runImage(const Job& job, JobCtl& ctl, std::string& err) {
         memcpy(&lat[((size_t)c * latH + y) * latW], &x[((size_t)c * Hp + y) * Wp], latW * sizeof(float));
     Krea2Vae::latentToVae(lat, latH, latW);
     std::vector<float> rgb;
-    if (!g.vae.decode(lat, latH, latW, rgb, err)) return false;
+    if (!g.vae.decode(lat, latH, latW, rgb, err, vaeTile)) return false;
 
     const int OW = latW * 8, OH = latH * 8;
     std::vector<uint8_t> px(rgb.size());

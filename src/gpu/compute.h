@@ -34,6 +34,8 @@ struct Compute {
     ggml_backend_buffer_t allocDeviceWeights(ggml_context* ctx);   // small weights: on the GPU when there is one
     std::string description() const { return desc; }
     bool usingGpu() const { return gpu != nullptr; }
+    bool gpuIntegrated = false;                                        // the active GPU is an integrated one (Intel / APU)
+    size_t gpuFreeMB() const { size_t f = 0, t = 0; if (gpuDev) ggml_backend_dev_memory(gpuDev, &f, &t); return f >> 20; }
 
     ggml_backend_t gpu = nullptr, cpu = nullptr;
     ggml_backend_dev_t gpuDev = nullptr;

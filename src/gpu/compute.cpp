@@ -50,7 +50,7 @@ void Compute::shutdown() {
     if (sched) ggml_backend_sched_free(sched);
     if (gpu) ggml_backend_free(gpu);
     if (cpu) ggml_backend_free(cpu);
-    schedCpu = sched = nullptr; gpu = cpu = nullptr; gpuDev = nullptr; inited = false; desc.clear(); activeKind = "cpu";
+    schedCpu = sched = nullptr; gpu = cpu = nullptr; gpuDev = nullptr; gpuIntegrated = false; inited = false; desc.clear(); activeKind = "cpu";
 }
 
 bool Compute::use(const std::string& prefIn, int threads, std::string& err) {
@@ -99,7 +99,9 @@ bool Compute::init(int threads, std::string& err, const std::string& prefIn) {
         gpu = ggml_backend_dev_init(best, nullptr);
         if (gpu) {
             gpuDev = best;
+            gpuIntegrated = ggml_backend_dev_type(best) == GGML_BACKEND_DEVICE_TYPE_IGPU;
             desc = std::string(ggml_backend_dev_description(best)) + " (" + ggml_backend_dev_name(best) + ")";
+            logLine("using " + desc + (gpuIntegrated ? " (integrated, shares the system memory)" : "") + ", free memory " + std::to_string(gpuFreeMB()) + " MB");
         }
     }
     if (!gpu) desc = "CPU";

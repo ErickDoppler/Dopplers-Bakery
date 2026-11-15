@@ -61,6 +61,7 @@ Check the license of each model before using or sharing its outputs.
 ## Laptops, integrated GPUs and low memory
 - Integrated GPUs (Intel, AMD APU) are used through Vulkan like any other GPU; on a PC whose only GPU is integrated the *Text to image* tab shows a **Backend** selector (Auto / Vulkan / CPU).
 - The image models need about 19 GB of free RAM in 8-bit form. If less is free the app switches to a **4-bit low-memory mode** by itself (about 11 GB, quality is still good); if even that does not fit it says so instead of crashing.
+- On a GPU with little or shared memory (integrated graphics) the app runs the image model in smaller slices and decodes in smaller tiles. If a graph still does not fit into the GPU memory, the job is repeated automatically on the CPU (slower, but it finishes) and the reason is written to `bakery.log`.
 - If the app ever dies inside a GPU job, the next start says so and uses the CPU until a GPU job succeeds again (choose Backend = Vulkan to retry). Engine warnings and crash details are written to `bakery.log` next to the exe: attach it when reporting a problem.
 
 ## Command line
