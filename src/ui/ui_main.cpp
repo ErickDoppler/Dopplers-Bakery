@@ -2,6 +2,7 @@
 #include "ui/ui.h"
 #include <objbase.h>
 #include <commctrl.h>
+#include <richedit.h>
 #include <cstring>
 #include <shellapi.h>
 #include <mmsystem.h>
@@ -14,6 +15,8 @@
 #include "web/server.h"
 #include "core/download.h"
 #include "core/forms.h"
+#include "core/suggest.h"
+#include <random>
 #include "core/queue.h"
 #include "core/settings.h"
 #include "ui/dialogs.h"
@@ -80,6 +83,99 @@ HFONT btnFont(bool bold) {
     if (!f[bold]) f[bold] = CreateFontW(bold ? -19 : -15, 0, 0, 0, bold ? FW_SEMIBOLD : FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     return f[bold];
 }
+// ----------------------------------------------------------------- suggestions in blank prompt fields
+// A blank prompt box shows an example in grey (as the chat's input does); Tab takes it, and Create on a blank main prompt uses it.
+struct Ghost { std::wstring text; std::string plain; };
+constexpr UINT_PTR kGhostId = 7;
+LRESULT CALLBACK ghostProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) {
+    Ghost* g = (Ghost*)ref;
+    if (m == WM_KEYDOWN && wp == VK_TAB && GetWindowTextLengthW(h) == 0 && !(GetKeyState(VK_SHIFT) & 0x8000)) {
+        uiSetText(h, g->plain);                         // the suggestion becomes the text
+        SendMessageW(h, EM_SETSEL, 0, -1);
+        return 0;
+    }
+    if (m == WM_GETDLGCODE && GetWindowTextLengthW(h) == 0) return DefSubclassProc(h, m, wp, lp) | DLGC_WANTTAB;
+    if (m == WM_CHAR && wp == VK_TAB) return 0;           // (the tab key's character, when it was taken above)
+    if (m == WM_NCDESTROY) { RemoveWindowSubclass(h, ghostProc, kGhostId); delete g; }
+    LRESULT r = DefSubclassProc(h, m, wp, lp);
+    if ((m == WM_PAINT || m == WM_ERASEBKGND || m == WM_SETFOCUS || m == WM_KILLFOCUS) && GetWindowTextLengthW(h) == 0 && !g->text.empty()) {
+        HDC dc = GetDC(h);
+        RECT rc; GetClientRect(h, &rc); InflateRect(&rc, -3, -1);
+        HFONT font = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
+        HGDIOBJ old = SelectObject(dc, font);
+        SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(150, 156, 166));
+        DrawTextW(dc, g->text.c_str(), -1, &rc, DT_WORDBREAK | DT_NOPREFIX);
+        SelectObject(dc, old); ReleaseDC(h, dc);
+    }
+    if (m == WM_CHAR || m == WM_KEYUP || m == WM_SETTEXT || m == WM_CUT || m == WM_PASTE || m == WM_CLEAR || m == WM_UNDO) InvalidateRect(h, nullptr, TRUE);
+    return r;
+}
+// The suggestion of a field, or none.
+std::string ghostOf(HWND h) {
+    DWORD_PTR ref = 0;
+    return GetWindowSubclass(h, ghostProc, kGhostId, &ref) && ref ? ((Ghost*)ref)->plain : std::string();
+}
+unsigned ghostSeed() { static std::mt19937 rng((unsigned)GetTickCount() ^ (unsigned)(uintptr_t)&rng); return rng(); }
+
+// ----------------------------------------------------------------- rich prompt boxes
+// The prompt boxes are rich edits: section labels at the start of a line ("Camera:", "Lighting:", "Sound:" ...) are coloured by kind, Ctrl+B / Ctrl+I
+// bold / italicise the selection. Only the plain text is ever sent to a model (uiText).
+LRESULT CALLBACK richProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR) {
+    if (m == WM_PASTE) { SendMessageW(h, EM_PASTESPECIAL, CF_UNICODETEXT, 0); return 0; }       // text only: no fonts or colours from other programs
+    if (m == WM_NCDESTROY) RemoveWindowSubclass(h, richProc, id);
+    return DefSubclassProc(h, m, wp, lp);
+}
+COLORREF labelColor(const std::wstring& w) {
+    static const struct { const wchar_t* word; COLORREF c; } k[] = {
+        {L"camera", RGB(31, 95, 191)}, {L"shot", RGB(31, 95, 191)}, {L"lens", RGB(31, 95, 191)}, {L"movement", RGB(31, 95, 191)}, {L"angle", RGB(31, 95, 191)},
+        {L"light", RGB(178, 106, 0)}, {L"colo", RGB(178, 106, 0)}, {L"palette", RGB(178, 106, 0)}, {L"mood", RGB(178, 106, 0)},
+        {L"sound", RGB(30, 123, 52)}, {L"audio", RGB(30, 123, 52)}, {L"music", RGB(30, 123, 52)}, {L"dialog", RGB(30, 123, 52)}, {L"speech", RGB(30, 123, 52)}, {L"voice", RGB(30, 123, 52)}, {L"ambien", RGB(30, 123, 52)},
+        {L"scene", RGB(123, 63, 160)}, {L"setting", RGB(123, 63, 160)}, {L"location", RGB(123, 63, 160)}, {L"environment", RGB(123, 63, 160)},
+        {L"subject", RGB(0, 125, 135)}, {L"character", RGB(0, 125, 135)}, {L"action", RGB(0, 125, 135)}, {L"story", RGB(0, 125, 135)}, {L"style", RGB(0, 125, 135)}, {L"effect", RGB(190, 60, 60)},
+    };
+    std::wstring l; for (wchar_t c : w) l += (wchar_t)towlower(c);
+    for (auto& e : k) if (l.find(e.word) != std::wstring::npos) return e.c;
+    return 0;
+}
+void highlightRich(HWND h) {
+    GETTEXTLENGTHEX gl = {GTL_DEFAULT, 1200};
+    const int n = (int)SendMessageW(h, EM_GETTEXTLENGTHEX, (WPARAM)&gl, 0);
+    if (n <= 0) return;
+    std::wstring t(n + 1, 0);                                                   // paragraphs end with one CR here, like the character positions
+    GETTEXTEX gt = {(DWORD)((n + 1) * 2), GT_DEFAULT, 1200, nullptr, nullptr};
+    SendMessageW(h, EM_GETTEXTEX, (WPARAM)&gt, (LPARAM)&t[0]); t.resize(n);
+    CHARRANGE keep; SendMessageW(h, EM_EXGETSEL, 0, (LPARAM)&keep);
+    const LRESULT mask = SendMessageW(h, EM_SETEVENTMASK, 0, 0);
+    SendMessageW(h, WM_SETREDRAW, FALSE, 0);
+    CHARFORMAT2W cf = {}; cf.cbSize = sizeof cf; cf.dwMask = CFM_COLOR; cf.dwEffects = CFE_AUTOCOLOR;
+    CHARRANGE all = {0, -1}; SendMessageW(h, EM_EXSETSEL, 0, (LPARAM)&all); SendMessageW(h, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+    size_t pos = 0;
+    while (pos < t.size()) {                                                    // each paragraph: "Label: text"
+        size_t end = t.find(L'\r', pos); if (end == std::wstring::npos) end = t.size();
+        size_t a = pos; while (a < end && t[a] == L' ') a++;
+        size_t colon = t.find(L':', a);
+        if (colon != std::wstring::npos && colon < end && colon - a >= 2 && colon - a <= 26) {
+            const COLORREF col = labelColor(t.substr(a, colon - a));
+            if (col) {
+                CHARFORMAT2W lf = {}; lf.cbSize = sizeof lf; lf.dwMask = CFM_COLOR | CFM_BOLD; lf.crTextColor = col; lf.dwEffects = CFE_BOLD;
+                CHARRANGE r = {(LONG)a, (LONG)colon + 1}; SendMessageW(h, EM_EXSETSEL, 0, (LPARAM)&r); SendMessageW(h, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&lf);
+            }
+        }
+        pos = end + 1;
+    }
+    SendMessageW(h, EM_EXSETSEL, 0, (LPARAM)&keep);
+    SendMessageW(h, WM_SETREDRAW, TRUE, 0);
+    SendMessageW(h, EM_SETEVENTMASK, 0, mask);
+    InvalidateRect(h, nullptr, TRUE);
+}
+void toggleFormat(HWND h, DWORD effect) {                                        // Ctrl+B / Ctrl+I
+    CHARFORMAT2W cf = {}; cf.cbSize = sizeof cf; cf.dwMask = CFM_BOLD | CFM_ITALIC;
+    SendMessageW(h, EM_GETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+    const bool on = (cf.dwEffects & effect) != 0;
+    CHARFORMAT2W set = {}; set.cbSize = sizeof set; set.dwMask = effect; set.dwEffects = on ? 0 : effect;
+    SendMessageW(h, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&set);
+}
+
 LRESULT CALLBACK hoverProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
     if (m == WM_MOUSEMOVE) {
         if (!GetPropW(h, L"hot")) { SetPropW(h, L"hot", (HANDLE)1); TRACKMOUSEEVENT t = {sizeof t, TME_LEAVE, h, 0}; TrackMouseEvent(&t); InvalidateRect(h, nullptr, FALSE); }
@@ -423,6 +519,21 @@ void onOutputAction(Page& p, int id) {
 }
 
 void onCreateClicked(Page& p) {
+    {   // A blank main prompt takes its suggestion (and the style box beside a TTS text its own): what was used shows in the boxes.
+        const char* mainKey = p.kind == Kind::TTS ? "text" : "prompt";
+        for (auto& c : p.fc) {
+            if (strcmp(c.f->key, mainKey) != 0) continue;
+            std::string cur = uiText(c.ctl);
+            if (cur.find_first_not_of(" \r\n\t") != std::string::npos) break;
+            const std::string sug = ghostOf(c.ctl);
+            if (sug.empty()) break;
+            uiSetText(c.ctl, sug);
+            for (auto& d : p.fc) {
+                if (p.kind == Kind::TTS && !strcmp(d.f->key, "instruct") && uiText(d.ctl).empty()) uiSetText(d.ctl, ghostOf(d.ctl));
+            }
+            break;
+        }
+    }
     Json form = readForm(p);
     Settings::get().setForm(p.kind, form);
     std::string main = p.kind == Kind::TTS ? form.str("text") : form.str("prompt");
@@ -455,6 +566,11 @@ LRESULT CALLBACK pageProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         switch (LOWORD(wp)) {
         case IDC_CREATE: onCreateClicked(*p); return 0;
         default:
+            if (HIWORD(wp) == EN_CHANGE) {                                  // a rich prompt box changed: colour its section labels
+                bool rich = false;
+                for (auto& c : p->fc) if (c.f->type == FT::Multi && c.ctl == (HWND)lp) rich = true;
+                if (rich) { highlightRich((HWND)lp); return 0; }
+            }
             if (p->kind == Kind::Image && LOWORD(wp) >= IDC_FIELD0 && LOWORD(wp) < IDC_FIELD0 + 64 && (HIWORD(wp) == CBN_SELCHANGE || HIWORD(wp) == CBN_EDITCHANGE || HIWORD(wp) == CBN_CLOSEUP)) { applyImageLimits(*p, HIWORD(wp) == CBN_SELCHANGE); return 0; }
             if (LOWORD(wp) >= IDC_BROWSE0 && LOWORD(wp) < IDC_BROWSE0 + 64) {          // "..." next to a file field
                 size_t idx = LOWORD(wp) - IDC_BROWSE0;
@@ -613,7 +729,11 @@ void buildPage(Page& p, Kind kind) {
         int id = IDC_FIELD0 + i++;
         if (f.type != FT::Check) c.label = uiMake(p.form, L"STATIC", f.label, SS_LEFT);
         switch (f.type) {
-        case FT::Multi: c.ctl = uiMake(p.form, L"EDIT", "", ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_TABSTOP, id, WS_EX_CLIENTEDGE); break;
+        case FT::Multi:
+            c.ctl = uiMake(p.form, L"RICHEDIT50W", "", ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_TABSTOP, id, WS_EX_CLIENTEDGE);
+            SendMessageW(c.ctl, EM_SETEVENTMASK, 0, ENM_CHANGE);
+            SetWindowSubclass(c.ctl, richProc, 9, 0);
+            break;
         case FT::Text: case FT::Int: case FT::Float: c.ctl = uiMake(p.form, L"EDIT", "", ES_AUTOHSCROLL | WS_TABSTOP, id, WS_EX_CLIENTEDGE); break;
         case FT::File:
             c.ctl = uiMake(p.form, L"EDIT", "", ES_AUTOHSCROLL | WS_TABSTOP, id, WS_EX_CLIENTEDGE);
@@ -635,6 +755,14 @@ void buildPage(Page& p, Kind kind) {
             SendMessageW(c.ctl, TBM_SETRANGE, TRUE, MAKELONG((int)f.mn, (int)f.mx));
             SendMessageW(c.ctl, TBM_SETPAGESIZE, 0, 50);
             break;
+        }
+        if (f.type == FT::Multi || f.type == FT::Text) {
+            static unsigned seed = ghostSeed();   // (one mood for the whole page: the TTS text and its style go together)
+            const std::string sug = suggestionFor(kind, f.key, seed + (unsigned)kind * 7u);
+            if (!sug.empty()) {
+                Ghost* g = new Ghost{sys::widen(sug), sug};
+                SetWindowSubclass(c.ctl, ghostProc, kGhostId, (DWORD_PTR)g);
+            }
         }
         p.fc.push_back(c);
     }
@@ -1182,6 +1310,10 @@ LRESULT CALLBACK mainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 // Keyboard shortcuts of the Audio (music) tab: F2 generate, F3 play/stop the latest generated file, Shift+Delete delete the selected file
 bool routeKey(MSG& msg) {
     if (msg.message != WM_KEYDOWN) return false;
+    if ((msg.wParam == 'B' || msg.wParam == 'I') && (GetKeyState(VK_CONTROL) & 0x8000)) {              // bold / italic in a rich prompt box
+        wchar_t cls[24] = {}; GetClassNameW(msg.hwnd, cls, 24);
+        if (!wcsncmp(cls, L"RICHEDIT", 8)) { toggleFormat(msg.hwnd, msg.wParam == 'B' ? CFE_BOLD : CFE_ITALIC); return true; }
+    }
     if (msg.wParam == 'A' && (GetKeyState(VK_CONTROL) & 0x8000)) {         // Ctrl+A in a multi-line text box (Windows does not do this by itself)
         wchar_t cls[16] = {}; GetClassNameW(msg.hwnd, cls, 16);
         if (!wcscmp(cls, L"Edit") && (GetWindowLongW(msg.hwnd, GWL_STYLE) & ES_MULTILINE)) { SendMessageW(msg.hwnd, EM_SETSEL, 0, -1); return true; }
@@ -1226,6 +1358,7 @@ bool routeWheel(MSG& msg) {
 
 int runGui(HINSTANCE inst) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    LoadLibraryW(L"Msftedit.dll");                                  // the rich edit control of the prompt boxes
     Settings::get().load();
     if (crashGuardRecover(g_recovered)) Settings::get().setUiInt("safe_cpu", 1);          // the last run died inside a GPU job
     Compute::setSafeMode(Settings::get().uiInt("safe_cpu", 0) != 0);

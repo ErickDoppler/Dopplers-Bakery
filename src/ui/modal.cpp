@@ -1,4 +1,4 @@
-#include "ui/modal.h"
+﻿#include "ui/modal.h"
 #include <commctrl.h>
 #include <shlobj.h>
 #include <commdlg.h>
@@ -31,14 +31,29 @@ void uiPlace(HWND h, int x, int y, int w, int hgt) {
     }
     MoveWindow(h, x, y, w, hgt, TRUE);
 }
+static bool isRichEdit(HWND h) { wchar_t cls[24] = {}; GetClassNameW(h, cls, 24); return !wcsncmp(cls, L"RICHEDIT", 8); }
 std::string uiText(HWND h) {
     int n = GetWindowTextLengthW(h);
     std::wstring w(n + 1, 0);
     GetWindowTextW(h, &w[0], n + 1);
     w.resize(n);
-    return sys::narrow(w);
+    std::string s = sys::narrow(w);
+    if (isRichEdit(h)) {                                   // a rich edit ends its paragraphs with a bare CR: callers get plain text with LF
+        std::string o; o.reserve(s.size());
+        for (size_t i = 0; i < s.size(); i++) { if (s[i] == '\r') { o += '\n'; if (i + 1 < s.size() && s[i + 1] == '\n') i++; } else o += s[i]; }
+        return o;
+    }
+    return s;
 }
-void uiSetText(HWND h, const std::string& s) { SetWindowTextW(h, sys::widen(s).c_str()); }
+void uiSetText(HWND h, const std::string& s) {
+    if (isRichEdit(h)) {
+        std::string o; o.reserve(s.size());
+        for (size_t i = 0; i < s.size(); i++) { if (s[i] == '\r') { o += '\r'; if (i + 1 < s.size() && s[i + 1] == '\n') i++; } else if (s[i] == '\n') o += '\r'; else o += s[i]; }
+        SetWindowTextW(h, sys::widen(o).c_str());
+        return;
+    }
+    SetWindowTextW(h, sys::widen(s).c_str());
+}
 
 static LRESULT CALLBACK modalProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     Modal* m = (Modal*)GetWindowLongPtrW(h, GWLP_USERDATA);
@@ -159,3 +174,4 @@ void clipboardSetFile(HWND owner, const std::string& path) {
     SetClipboardData(CF_HDROP, g);
     CloseClipboard();
 }
+
