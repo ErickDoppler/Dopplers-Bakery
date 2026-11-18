@@ -33,7 +33,7 @@ Block layout (per block): `attn1` video self-attention, `attn2` text cross-atten
 | # | Deliverable | Verification |
 |---|---|---|
 | 0 | Tab, form, model roles, queue entry, engine stub (done) | tab visible, job reports a clear message |
-| 1 | Safetensors loader for F8_E4M3 / BF16 / NVFP4 -> ggml types, dequant kernels (CPU first), tensor map | load every tensor, checksum a few against a reference dump |
+| 1 | **Done.** `src/ltx/ltx_weights.*`: F32/BF16/FP8 (+scale)/NVFP4 (cuBLAS-tiled block scales) -> float32. `DopplersBakery ltx-weights <ckpt> <gemma>` vs `tools/ltx_ref.py` (ComfyUI code): 12 tensors, checksums identical | loader checksums equal ComfyUI |
 | 2 | Gemma 3 text encoder (NVFP4) + aggregate embeds + connectors | embeddings equal to ComfyUI output for the same prompt (dumped from ComfyUI once) |
 | 3 | Video VAE decoder (and encoder for i2v), tiled | decode a ComfyUI latent to frames that match |
 | 4 | DiT forward (video + audio streams, cross-modal attention, rope, adaLN) with layer streaming from RAM (27 GB does not fit 12 GB VRAM) | one step output equals ComfyUI |
