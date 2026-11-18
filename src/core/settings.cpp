@@ -44,6 +44,8 @@ static bool roleAccepts(Kind k, const std::string& role, const std::string& full
     if (k == Kind::Image && role == "vae") return headerHasAll(full, {"\"decoder.upsamples.", "\"conv2.weight\""});
     if (k == Kind::Audio && role == "model") return headerHasAll(full, {"\"model.model.transformer.", "\"pretransform.model.decoder."});
     if (k == Kind::Audio && role == "clip") return headerHasAll(full, {"\"model.encoder.layers.0.", "\"spiece_model\""});
+    if (k == Kind::Video && role == "model") return headerHasAll(full, {"\"model.diffusion_model.audio_patchify_proj.weight\"", "\"vae.decoder."});
+    if (k == Kind::Video && role == "clip") return headerHasAll(full, {"\"model.layers.0.pre_feedforward_layernorm.weight\"", "\"vision_model."});
     return true;
 }
 

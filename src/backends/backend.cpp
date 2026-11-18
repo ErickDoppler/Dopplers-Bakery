@@ -33,6 +33,7 @@ BackendFn backendFor(Kind k) {
     case Kind::LLM: return runLLM;
     case Kind::TTS: return withCpuRetry(runTTS);
     case Kind::Image: return withCpuRetry(runImage);
+    case Kind::Video: return runVideo;
     default: return withCpuRetry(runAudio);
     }
 }

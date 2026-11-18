@@ -63,7 +63,20 @@ const std::vector<Field>& fieldsOf(Kind k) {
         {"format", "File format", FT::Combo, 0, 0, 0, "mp3", "mp3|wav", 0},
         {"mp3_quality", "MP3 quality (V0 = 256 kbps)", FT::Combo, 0, 0, 0, "V0", "V0|128k|320k", 0},
     };
-    switch (k) { case Kind::LLM: return llm; case Kind::TTS: return tts; case Kind::Image: return img; default: return aud; }
+    // defaults follow VIDEO_WORKFLOW.json: 768x512, 24 fps, two stages with the x2 spatial upscaler
+    static const std::vector<Field> vid = {
+        {"prompt", "Prompt (what happens: actions, camera, light, sound)", FT::Multi, 0, 0, 0, "", "", 6},
+        {"negative", "Negative prompt", FT::Multi, 0, 0, 0, "pc game, console game, video game, cartoon, childish, ugly", "", 2},
+        {"init_image", "Start image for image-to-video (optional; empty = text to video)", FT::File, 0, 0, 0, "", "", 0},
+        {"width", "Width (first stage; the upscaler doubles it)", FT::Slider, 768, 256, 1536, "", "", 0},
+        {"height", "Height (first stage)", FT::Slider, 512, 256, 1088, "", "", 0},
+        {"seconds", "Length (seconds)", FT::Slider, 4, 1, 20, "", "", 0},
+        {"fps", "Frames per second", FT::Int, 24, 8, 50, "", "", 0},
+        {"seed", "Seed (-1 = random)", FT::Int, -1, -1, 2147483647, "", "", 0},
+        {"upscale", "Second stage: x2 spatial upscaler", FT::Check, 1, 0, 1, "", "", 0},
+        {"audio", "Generate the sound track", FT::Check, 1, 0, 1, "", "", 0},
+    };
+    switch (k) { case Kind::LLM: return llm; case Kind::TTS: return tts; case Kind::Image: return img; case Kind::Video: return vid; default: return aud; }
 }
 
 Json defaultsOf(Kind k) {
