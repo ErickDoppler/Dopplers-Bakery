@@ -1,4 +1,4 @@
-#include "core/forms.h"
+﻿#include "core/forms.h"
 #include "core/settings.h"
 #include "gpu/compute.h"
 
@@ -68,8 +68,8 @@ const std::vector<Field>& fieldsOf(Kind k) {
         {"prompt", "Prompt (what happens: actions, camera, light, sound)", FT::Multi, 0, 0, 0, "", "", 6},
         {"negative", "Negative prompt", FT::Multi, 0, 0, 0, "pc game, console game, video game, cartoon, childish, ugly", "", 2},
         {"init_image", "Start image for image-to-video (optional; empty = text to video)", FT::File, 0, 0, 0, "", "", 0},
-        {"width", "Width (first stage; the upscaler doubles it)", FT::Slider, 768, 256, 1536, "", "", 0},
-        {"height", "Height (first stage)", FT::Slider, 512, 256, 1088, "", "", 0},
+        {"width", "Width of the video (multiple of 64; the first stage runs at half of it)", FT::Slider, 768, 256, 1536, "", "", 0},
+        {"height", "Height of the video (multiple of 64)", FT::Slider, 512, 256, 1536, "", "", 0},
         {"seconds", "Length (seconds)", FT::Slider, 4, 1, 20, "", "", 0},
         {"fps", "Frames per second", FT::Int, 24, 8, 50, "", "", 0},
         {"seed", "Seed (-1 = random)", FT::Int, -1, -1, 2147483647, "", "", 0},
@@ -104,3 +104,4 @@ Json makeJobParams(Kind k, const Json& form) {
     for (auto& r : rolesOf(k)) p[r.key] = Settings::get().resolvedSelection(k, r.key);
     return p;
 }
+

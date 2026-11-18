@@ -1,4 +1,4 @@
-// Main window: operation tabs on the left, queue manager on the right.
+﻿// Main window: operation tabs on the left, queue manager on the right.
 #include "ui/ui.h"
 #include <objbase.h>
 #include <commctrl.h>
@@ -567,6 +567,7 @@ std::string infoText(const Job& j) {
     if (!j.info.empty()) return j.info;
     if (j.kind == Kind::Image && j.params.has("width")) return std::to_string(j.params.integer("width", 0)) + "x" + std::to_string(j.params.integer("height", 0));
     if (j.kind == Kind::Audio && j.params.has("length")) return std::to_string(j.params.integer("length", 0)) + " s";
+    if (j.kind == Kind::Video && j.params.has("seconds")) return std::to_string(j.params.integer("width", 0)) + "x" + std::to_string(j.params.integer("height", 0)) + ", " + std::to_string(j.params.integer("seconds", 0)) + " s";
     return "";
 }
 std::string timeText(const Job& j) {
@@ -1118,3 +1119,4 @@ int runGui(HINSTANCE inst) {
     JobQueue::get().shutdown();
     return 0;
 }
+

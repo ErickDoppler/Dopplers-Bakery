@@ -11,6 +11,14 @@
 
 struct LtxFiles { std::string checkpoint, gemma, upscaler, lora; };
 
+// The opened model files and the merged-weight cache; keep one alive between jobs (merging the LoRA takes minutes, the F16 copy of the transformer is ~37 GB of RAM).
+struct LtxModels {
+    LtxFiles files; float loraStrength = -1.f;
+    LtxWeights ck, up; LtxLora lora;
+    bool open(const LtxFiles& f, float strength, std::string& err);
+    void release();
+};
+
 struct LtxGenParams {
     std::string prompt;
     int width = 768, height = 512;        // final size (multiples of 64); stage 1 runs at half of it
@@ -23,6 +31,7 @@ struct LtxGenParams {
     int ditBlocks = 48;                   // fewer only for tests
     ImageRgb* startImage = nullptr;       // optional
     float stage1Strength = 1.0f, stage2Strength = 0.7f;
+    std::function<bool()> cancel;         // return true to stop
 };
 
 struct LtxResult {
@@ -34,7 +43,8 @@ struct LtxResult {
 };
 
 // progress(0..1, text); return false from `cancel` to stop
-bool ltxGenerate(const LtxFiles& files, const LtxGenParams& p, LtxResult& out, const std::function<void(float, const std::string&)>& progress, std::string& err);
+bool ltxGenerate(LtxModels& models, const LtxGenParams& p, LtxResult& out, const std::function<void(float, const std::string&)>& progress, std::string& err);
 
 int runLtxGenTest(const std::vector<std::string>& args);      // ltx-gen <out dir> "<prompt>" W H seconds fps seed [image] [blocks]
+
 
