@@ -45,7 +45,9 @@ int expandVideoPrompt(const Json& p, const Job& job, const std::string& prompt, 
     q["seed"] = p.num("seed", -1); q["no_output"] = true;
     j.params = q;
     CaptureCtl cap(ctl); std::string err;
-    if (!runLLM(j, cap, err)) { if (err == "cancelled") return 2; note = "prompt not expanded: " + err; return 1; }
+    const bool ran = runLLM(j, cap, err);
+    releaseLLM();                                                           // the chat model leaves the video memory before the video model comes in
+    if (!ran) { if (err == "cancelled") return 2; note = "prompt not expanded: " + err; return 1; }
     const size_t a = cap.text.find_first_not_of(" \r\n\t");
     if (a == std::string::npos) { note = "prompt not expanded: the chat model returned nothing"; return 1; }
     out = cap.text.substr(a, cap.text.find_last_not_of(" \r\n\t") - a + 1);
@@ -122,6 +124,13 @@ bool runVideo(const Job& job, JobCtl& ctl, std::string& err) {
     const std::string file = outputPath("video", job.id, ".mp4");
     if (!writeMp4(file, ptrs, r.frames.W, r.frames.H, gp.fps, inter, 2, LtxAudio::kSampleRate, err)) return false;
     ctl.addOutput(file);
+    {   // next to the video: the prompts and settings it was made from (the expanded prompt is the one that counted)
+        std::string t = "Prompt:\n" + p.str("prompt") + "\n\n";
+        if (prompt != p.str("prompt")) t += "Expanded prompt used:\n" + prompt + "\n\n";
+        t += "Negative prompt:\n" + p.str("negative") + "\n\n";
+        char b[200]; snprintf(b, sizeof b, "Size %dx%d, %.0f s, %d fps, seed %lld, upscale %s\n", gp.width, gp.height, (double)gp.seconds, gp.fps, seed, gp.upscale ? "on" : "off");
+        sys::writeFile(file.substr(0, file.size() - 4) + ".txt", t + b);
+    }
     char done[200];
     snprintf(done, sizeof done, "%dx%d, %d frames in %.0f s on %s, seed %lld", r.frames.W, r.frames.H, r.frames.T, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), Compute::get().description().c_str(), seed);
     ctl.progress(1.0f, std::string(done) + expandNote);
@@ -145,6 +154,7 @@ int runVideoExpandTest(const std::vector<std::string>& a) {
     printf("%s\n", r == 0 ? out.c_str() : ("NOT EXPANDED: " + note).c_str());
     return r == 0 ? 0 : 1;
 }
+
 
 
 

@@ -1,4 +1,4 @@
-// LLM text generation on the embedded llama.cpp/ggml runtime (CPU).
+﻿// LLM text generation on the embedded llama.cpp/ggml runtime (CPU).
 #include <algorithm>
 #include <chrono>
 #include <random>
@@ -37,6 +37,9 @@ bool ensureModel(const std::string& path, const std::string& lora, JobCtl& ctl, 
     return true;
 }
 
+// frees the cached chat model (the video generator needs the video memory and runs its own GPU backend)
+void releaseLLMModel() { if (g_cache.model) { llama_model_free(g_cache.model); g_cache = ModelCache(); } }
+
 std::string stripThink(const std::string& s) {
     size_t a = s.find("<think>"), b = s.find("</think>");
     if (a == std::string::npos && b != std::string::npos) return s.substr(b + 8);
@@ -44,6 +47,8 @@ std::string stripThink(const std::string& s) {
     return s;
 }
 }  // namespace
+
+void releaseLLM() { releaseLLMModel(); }
 
 bool runLLM(const Job& job, JobCtl& ctl, std::string& err) {
     const Json& p = job.params;
@@ -154,3 +159,5 @@ bool runLLM(const Job& job, JobCtl& ctl, std::string& err) {
     ctl.addOutput(file);
     return true;
 }
+
+
