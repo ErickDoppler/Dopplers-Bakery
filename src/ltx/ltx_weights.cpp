@@ -1,8 +1,9 @@
-#include "ltx/ltx_weights.h"
+﻿#include "ltx/ltx_weights.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <thread>
 
 static bool endsWith(const std::string& s, const char* suf) { size_t n = strlen(suf); return s.size() >= n && s.compare(s.size() - n, n, suf) == 0; }
 
@@ -41,6 +42,38 @@ void ltxUnswizzleScales(const uint8_t* blocked, int64_t rows, int64_t cols, std:
 }
 
 bool LtxWeights::loadF32(const std::string& name, std::vector<float>& out, std::string& err) const {
+    if (!loadF32Raw(name, out, err)) return false;
+    if (lora && endsWith(name, ".weight")) { std::vector<int64_t> sh; if (shapeOf(name, sh) && sh.size() == 2) lora->apply(name, out, sh[0], sh[1]); }
+    return true;
+}
+
+bool LtxLora::apply(const std::string& weightName, std::vector<float>& w, int64_t outDim, int64_t inDim) const {
+    std::string base = weightName.substr(0, weightName.size() - 7);
+    if (base.compare(0, 6, "model.") == 0) base = base.substr(6);
+    const StTensor *A = file.find(base + ".lora_A.weight"), *B = file.find(base + ".lora_B.weight");
+    if (!A || !B || A->shape.size() != 2 || B->shape.size() != 2 || A->shape[1] != inDim || B->shape[0] != outDim) return false;
+    const int64_t r = A->shape[0];
+    float alpha = (float)r; file.scalar(base + ".alpha", alpha);
+    const float scale = strength * alpha / (float)r;
+    std::vector<float> a, b; file.toFloat(*A, a); file.toFloat(*B, b);
+    auto work = [&](int64_t o0, int64_t o1) {
+        for (int64_t o = o0; o < o1; o++) {
+            float* row = &w[(size_t)o * inDim];
+            for (int64_t k = 0; k < r; k++) {
+                const float coef = b[(size_t)o * r + k] * scale; if (coef == 0.f) continue;
+                const float* ar = &a[(size_t)k * inDim];
+                for (int64_t i = 0; i < inDim; i++) row[i] += coef * ar[i];
+            }
+        }
+    };
+    const int nt = (int)std::max(1u, std::thread::hardware_concurrency());
+    std::vector<std::thread> th;
+    for (int t = 0; t < nt; t++) th.emplace_back(work, outDim * t / nt, outDim * (t + 1) / nt);
+    for (auto& t : th) t.join();
+    return true;
+}
+
+bool LtxWeights::loadF32Raw(const std::string& name, std::vector<float>& out, std::string& err) const {
     const StTensor* t = file.find(name);
     if (!t) { err = "tensor not found: " + name; return false; }
     const std::string fmt = formatOf(name);
@@ -105,3 +138,4 @@ int runLtxWeightsTest(const std::vector<std::string>& a) {
     }
     return bad ? 1 : 0;
 }
+

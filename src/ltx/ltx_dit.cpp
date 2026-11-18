@@ -1,4 +1,4 @@
-#include "ltx/ltx_dit.h"
+﻿#include "ltx/ltx_dit.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -265,6 +265,8 @@ static void compare(const char* what, const std::vector<float>& a, const std::ve
 int runLtxDitTest(const std::vector<std::string>& a) {
     if (a.size() < 2) { fprintf(stderr, "usage: ltx-dit <ltx checkpoint> <reference dir> [blocks F h w audioTokens]\n"); return 2; }
     LtxWeights w; std::string err; if (!w.open(a[0], err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+    LtxLora lora; const float ls = a.size() > 7 ? (float)atof(a[7].c_str()) : 0.f;           // optional distilled LoRA strength (same file as the reference)
+    if (ls > 0) { lora.strength = ls; if (!lora.open("c:\\workenv\\ComfyUI-Easy-Install\\ComfyUI-Easy-Install\\ComfyUI\\models\\loras\\ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors", err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; } w.lora = &lora; }
     LtxDit dit; dit.ckpt = &w; dit.blocks = a.size() > 2 ? atoi(a[2].c_str()) : 2;
     LtxDitInput in; in.F = a.size() > 3 ? atoi(a[3].c_str()) : 3; in.h = a.size() > 4 ? atoi(a[4].c_str()) : 4; in.w = a.size() > 5 ? atoi(a[5].c_str()) : 4; in.T = a.size() > 6 ? atoi(a[6].c_str()) : 10;
     std::vector<float> ctx, ro, rao;
@@ -278,3 +280,4 @@ int runLtxDitTest(const std::vector<std::string>& a) {
     compare("video", vo, ro); compare("audio", ao, rao);
     return 0;
 }
+

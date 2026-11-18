@@ -1,4 +1,4 @@
-# Reference for stage 4 (the audio+video transformer): ComfyUI's LTXAVModel with the first N blocks, float32 on CPU, small seeded inputs.
+﻿# Reference for stage 4 (the audio+video transformer): ComfyUI's LTXAVModel with the first N blocks, float32 on CPU, small seeded inputs.
 # Run from the ComfyUI folder:  python_embeded\python.exe -I tools\ltx_ref_dit.py <ref dir> [N blocks] [F h w] [audio tokens]
 import sys, os, json, numpy as np, torch
 from safetensors import safe_open
@@ -21,6 +21,17 @@ with safe_open(CK, "pt") as f:
         if t.dtype == torch.float8_e4m3fn: t = t.float() * f.get_tensor(k[:-len("weight")] + "weight_scale").float()
         sd[k] = t.float()
 print("loaded", len(sd), "tensors")
+LS = float(sys.argv[7]) if len(sys.argv) > 7 else 0.0        # distilled LoRA strength (0 = none)
+if LS:
+    with safe_open(C + r"\models\loras\ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors", "pt") as lf:
+        lk = set(lf.keys()); n = 0
+        for k in list(sd.keys()):
+            if not k.endswith(".weight"): continue
+            b = k[len("model."):-len(".weight")]
+            if b + ".lora_A.weight" in lk:
+                A = lf.get_tensor(b + ".lora_A.weight").float(); B = lf.get_tensor(b + ".lora_B.weight").float(); al = float(lf.get_tensor(b + ".alpha")) if b + ".alpha" in lk else A.shape[0]
+                sd[k] = sd[k] + LS * al / A.shape[0] * (B @ A); n += 1
+        print("lora merged into", n, "weights")
 cfg = json.loads(md["config"])["transformer"]
 dc = comfy.model_detection.detect_unet_config(sd, P, metadata=md)
 print("detected", {k: v for k, v in dc.items() if k in ("num_layers", "image_model", "cross_attention_adaln", "apply_gated_attention")})
@@ -38,3 +49,4 @@ with torch.no_grad():
 vo, ao = o
 print("out", tuple(vo.shape), tuple(ao.shape), float(vo.abs().max()), float(ao.abs().max()))
 for n, a in (("dit_vx", vx), ("dit_ax", ax), ("dit_vo", vo), ("dit_ao", ao), ("dit_ctx", ctx)): a.detach().numpy().astype(np.float32).tofile(out + "\\" + n + ".bin")
+
