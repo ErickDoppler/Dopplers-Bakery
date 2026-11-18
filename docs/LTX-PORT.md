@@ -1,4 +1,4 @@
-# LTX-2.3 native port (Text/Image to video tab)
+﻿# LTX-2.3 native port (Text/Image to video tab)
 
 Goal: run `VIDEO_WORKFLOW.json` (LTX-2.3 22B audio+video, image-to-video) inside Dopplers Bakery with C++/ggml only, no ComfyUI, no Python.
 Files the user downloads: `ltx-2.3-22b-dev-fp8.safetensors` (27 GB), `gemma_3_12B_it_fp4_mixed.safetensors` (8.8 GB),
@@ -42,3 +42,4 @@ Block layout (per block): `attn1` video self-attention, `attn2` text cross-atten
 | 7 | Memory/speed work, UI polish, prompt enhancement, release | 4 s clip in a reasonable time on 12 GB |
 
 References needed for exactness: the open-source `Lightricks/LTX-2` repository and ComfyUI's `comfy/ldm/lightricks` code; both are read, not copied wholesale.
+
