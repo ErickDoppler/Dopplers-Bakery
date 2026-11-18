@@ -12,6 +12,12 @@ constexpr int kVD = 4096, kAD = 2048, kHeads = 32;
 
 struct Att { TT wq, bq, wk, bk, wv, bv, wo, bo, qn, kn, wg, bg; };
 struct Rope { TT cs, sn; int half; };
+struct BlockW {                                    // everything one transformer block needs on the device
+    WeightSet W; Att va1{}, va2{}, aa1{}, aa2{}, a2v{}, v2a{};
+    TT fw1 = nullptr, fb1 = nullptr, fw2 = nullptr, fb2 = nullptr, gw1 = nullptr, gb1 = nullptr, gw2 = nullptr, gb2 = nullptr;
+    TT tV = nullptr, tA = nullptr, tPV = nullptr, tPA = nullptr, tCaA = nullptr, tCaV = nullptr;
+    bool loaded = false;
+};
 
 TT tab(WeightSet& W, const LtxWeights& ck, const std::string& n, std::string& err) {          // small 2D F32 table [rows][dim] -> ggml [dim, rows]
     std::vector<int64_t> sh; std::vector<float> d;
@@ -37,24 +43,32 @@ TT ropeApply(ggml_context* c, TT t, const Rope& r) {             // t [hd, heads
     return ggml_concat(c, o1, o2, 0);
 }
 
+bool flashAttention() { static const bool on = getenv("LTX_NO_FLASH") == nullptr; return on; }
+
 // gated multi-head attention: xq [dq, Nq] attends to xkv [dk, Nk]
 TT attention(ggml_context* c, const Att& a, TT xq, TT xkv, int hd, const Rope* rq, const Rope* rk) {
     const int heads = kHeads; const int64_t Nq = xq->ne[1], Nk = xkv->ne[1];
-    TT q = ggml_mul(c, ggml_rms_norm(c, ggml_add(c, ggml_mul_mat(c, a.wq, xq), a.bq), 1e-5f), a.qn);
-    TT k = ggml_mul(c, ggml_rms_norm(c, ggml_add(c, ggml_mul_mat(c, a.wk, xkv), a.bk), 1e-5f), a.kn);
-    TT v = ggml_add(c, ggml_mul_mat(c, a.wv, xkv), a.bv);
+    TT q = ggml_mul(c, ggml_rms_norm(c, ggml_add(c, mm(c, a.wq, xq), a.bq), 1e-5f), a.qn);
+    TT k = ggml_mul(c, ggml_rms_norm(c, ggml_add(c, mm(c, a.wk, xkv), a.bk), 1e-5f), a.kn);
+    TT v = ggml_add(c, mm(c, a.wv, xkv), a.bv);
     TT q3 = ggml_reshape_3d(c, q, hd, heads, Nq), k3 = ggml_reshape_3d(c, k, hd, heads, Nk), v3 = ggml_reshape_3d(c, v, hd, heads, Nk);
     if (rq) q3 = ropeApply(c, q3, *rq);
     if (rk) k3 = ropeApply(c, k3, *rk);
-    TT sc = ggml_soft_max_ext(c, ggml_mul_mat(c, ggml_permute(c, k3, 0, 2, 1, 3), ggml_permute(c, q3, 0, 2, 1, 3)), nullptr, 1.0f / std::sqrt((float)hd), 0.f);      // [Nk, Nq, heads]
-    TT vp = ggml_cont(c, ggml_permute(c, v3, 1, 2, 0, 3));                                          // [Nk, hd, heads]
-    TT o = ggml_cont(c, ggml_permute(c, ggml_mul_mat(c, vp, sc), 0, 2, 1, 3));                     // [hd, heads, Nq]
-    TT gate = ggml_scale(c, ggml_sigmoid(c, ggml_add(c, ggml_mul_mat(c, a.wg, xq), a.bg)), 2.0f);   // [heads, Nq]
+    TT o;
+    if (flashAttention()) {                                                                            // fused kernel: no Nq x Nk score matrix in memory
+        TT kf = ggml_cast(c, ggml_permute(c, k3, 0, 2, 1, 3), GGML_TYPE_F16), vf = ggml_cast(c, ggml_permute(c, v3, 0, 2, 1, 3), GGML_TYPE_F16);
+        o = ggml_flash_attn_ext(c, ggml_permute(c, q3, 0, 2, 1, 3), kf, vf, nullptr, 1.0f / std::sqrt((float)hd), 0.f, 0.f);        // [hd, heads, Nq]
+    } else {
+        TT sc = ggml_soft_max_ext(c, ggml_mul_mat(c, ggml_permute(c, k3, 0, 2, 1, 3), ggml_permute(c, q3, 0, 2, 1, 3)), nullptr, 1.0f / std::sqrt((float)hd), 0.f);      // [Nk, Nq, heads]
+        TT vp = ggml_cont(c, ggml_permute(c, v3, 1, 2, 0, 3));                                          // [Nk, hd, heads]
+        o = ggml_cont(c, ggml_permute(c, ggml_mul_mat(c, vp, sc), 0, 2, 1, 3));                        // [hd, heads, Nq]
+    }
+    TT gate = ggml_scale(c, ggml_sigmoid(c, ggml_add(c, mm(c, a.wg, xq), a.bg)), 2.0f);   // [heads, Nq]
     o = ggml_mul(c, o, ggml_reshape_3d(c, gate, 1, heads, Nq));
-    return ggml_add(c, ggml_mul_mat(c, a.wo, ggml_reshape_2d(c, o, (int64_t)hd * heads, Nq)), a.bo);
+    return ggml_add(c, mm(c, a.wo, ggml_reshape_2d(c, o, (int64_t)hd * heads, Nq)), a.bo);
 }
 
-TT feedForward(ggml_context* c, TT w1, TT b1, TT w2, TT b2, TT x) { return ggml_add(c, ggml_mul_mat(c, w2, ggml_gelu(c, ggml_add(c, ggml_mul_mat(c, w1, x), b1))), b2); }
+TT feedForward(ggml_context* c, TT w1, TT b1, TT w2, TT b2, TT x) { return ggml_add(c, mm(c, w2, ggml_gelu(c, ggml_add(c, mm(c, w1, x), b1))), b2); }
 TT affine(ggml_context* c, TT x, TT scale, TT shift) { return ggml_add(c, ggml_add(c, x, ggml_mul(c, x, scale)), shift); }      // x * (1 + scale) + shift
 // row r of (table + ada): table [dim, rows], ada [rows * dim, F]  ->  [dim, 1, F]
 TT modRow(ggml_context* c, TT table, TT ada, int r, int dim) {
@@ -94,8 +108,8 @@ bool adaln(const LtxWeights& ck, const std::string& p, const std::vector<float>&
     if (!err.empty() || !W.upload(err)) return false;
     Graph G(64); ggml_context* c = G.c;
     TT x = ggml_new_tensor_2d(c, GGML_TYPE_F32, 256, n); ggml_set_input(x);
-    TT e = ggml_add(c, ggml_mul_mat(c, w2, ggml_silu(c, ggml_add(c, ggml_mul_mat(c, w1, x), b1))), b2);
-    TT m = ggml_add(c, ggml_mul_mat(c, wl, ggml_silu(c, e)), bl);
+    TT e = ggml_add(c, mm(c, w2, ggml_silu(c, ggml_add(c, mm(c, w1, x), b1))), b2);
+    TT m = ggml_add(c, mm(c, wl, ggml_silu(c, e)), bl);
     ggml_set_output(e); ggml_set_output(m); ggml_build_forward_expand(G.g, e); ggml_build_forward_expand(G.g, m);
     if (!runGraph(G, err)) return false;
     ggml_backend_tensor_set(x, sin256.data(), 0, sin256.size() * 4);
@@ -121,7 +135,7 @@ bool LtxDit::forward(const LtxDitInput& in, std::vector<float>& videoOut, std::v
     auto project = [&](const std::string& name, const std::vector<float>& tok, int n, int outDim, std::vector<float>& out) -> bool {
         WeightSet W; TT w = W.mat(ck, P + name + ".weight", err), b = W.vec(ck, P + name + ".bias", err);
         if (!err.empty() || !W.upload(err)) return false;
-        Graph G(16); ggml_context* c = G.c; TT x = input2d(c, 128, n); TT y = ggml_add(c, ggml_mul_mat(c, w, x), b);
+        Graph G(16); ggml_context* c = G.c; TT x = input2d(c, 128, n); TT y = ggml_add(c, mm(c, w, x), b);
         ggml_set_output(y); ggml_build_forward_expand(G.g, y);
         if (!runGraph(G, err)) return false;
         setT(x, tok); if (!computeGraph(G, err)) return false;
@@ -162,15 +176,23 @@ bool LtxDit::forward(const LtxDitInput& in, std::vector<float>& videoOut, std::v
     for (int b = 0; b < blocks; b++) {
         if (progress) progress(b);
         const std::string p = P + "transformer_blocks." + std::to_string(b) + ".";
-        WeightSet W;
-        Att va1, va2, aa1, aa2, a2v, v2a;
-        loadAtt(W, ck, p + "attn1.", va1, err) && loadAtt(W, ck, p + "attn2.", va2, err) && loadAtt(W, ck, p + "audio_attn1.", aa1, err) && loadAtt(W, ck, p + "audio_attn2.", aa2, err) &&
-            loadAtt(W, ck, p + "audio_to_video_attn.", a2v, err) && loadAtt(W, ck, p + "video_to_audio_attn.", v2a, err);
-        TT fw1 = W.mat(ck, p + "ff.net.0.proj.weight", err), fb1 = W.vec(ck, p + "ff.net.0.proj.bias", err), fw2 = W.mat(ck, p + "ff.net.2.weight", err), fb2 = W.vec(ck, p + "ff.net.2.bias", err);
-        TT gw1 = W.mat(ck, p + "audio_ff.net.0.proj.weight", err), gb1 = W.vec(ck, p + "audio_ff.net.0.proj.bias", err), gw2 = W.mat(ck, p + "audio_ff.net.2.weight", err), gb2 = W.vec(ck, p + "audio_ff.net.2.bias", err);
-        TT tV = tab(W, ck, p + "scale_shift_table", err), tA = tab(W, ck, p + "audio_scale_shift_table", err), tPV = tab(W, ck, p + "prompt_scale_shift_table", err), tPA = tab(W, ck, p + "audio_prompt_scale_shift_table", err);
-        TT tCaA = tab(W, ck, p + "scale_shift_table_a2v_ca_audio", err), tCaV = tab(W, ck, p + "scale_shift_table_a2v_ca_video", err);
-        if (!err.empty() || !W.upload(err)) return false;
+        std::shared_ptr<BlockW> bw = (b < (int)resident_.size() && resident_[b]) ? std::static_pointer_cast<BlockW>(resident_[b]) : std::make_shared<BlockW>();
+        WeightSet& W = bw->W;
+        Att &va1 = bw->va1, &va2 = bw->va2, &aa1 = bw->aa1, &aa2 = bw->aa2, &a2v = bw->a2v, &v2a = bw->v2a;
+        TT &fw1 = bw->fw1, &fb1 = bw->fb1, &fw2 = bw->fw2, &fb2 = bw->fb2, &gw1 = bw->gw1, &gb1 = bw->gb1, &gw2 = bw->gw2, &gb2 = bw->gb2;
+        TT &tV = bw->tV, &tA = bw->tA, &tPV = bw->tPV, &tPA = bw->tPA, &tCaA = bw->tCaA, &tCaV = bw->tCaV;
+        if (!bw->loaded) {
+            loadAtt(W, ck, p + "attn1.", va1, err) && loadAtt(W, ck, p + "attn2.", va2, err) && loadAtt(W, ck, p + "audio_attn1.", aa1, err) && loadAtt(W, ck, p + "audio_attn2.", aa2, err) &&
+                loadAtt(W, ck, p + "audio_to_video_attn.", a2v, err) && loadAtt(W, ck, p + "video_to_audio_attn.", v2a, err);
+            fw1 = W.mat(ck, p + "ff.net.0.proj.weight", err); fb1 = W.vec(ck, p + "ff.net.0.proj.bias", err); fw2 = W.mat(ck, p + "ff.net.2.weight", err); fb2 = W.vec(ck, p + "ff.net.2.bias", err);
+            gw1 = W.mat(ck, p + "audio_ff.net.0.proj.weight", err); gb1 = W.vec(ck, p + "audio_ff.net.0.proj.bias", err); gw2 = W.mat(ck, p + "audio_ff.net.2.weight", err); gb2 = W.vec(ck, p + "audio_ff.net.2.bias", err);
+            tV = tab(W, ck, p + "scale_shift_table", err); tA = tab(W, ck, p + "audio_scale_shift_table", err); tPV = tab(W, ck, p + "prompt_scale_shift_table", err); tPA = tab(W, ck, p + "audio_prompt_scale_shift_table", err);
+            tCaA = tab(W, ck, p + "scale_shift_table_a2v_ca_audio", err); tCaV = tab(W, ck, p + "scale_shift_table_a2v_ca_video", err);
+            if (!err.empty() || !W.upload(err)) return false;
+            bw->loaded = true;
+        }
+        // keep the block in video memory for the next steps while there is room (the rest of the memory is for the activations)
+        const bool keepIt = !(b < (int)resident_.size() && resident_[b]) && Compute::get().gpuFreeMB() > (size_t)(4500 + N / 2);
 
         Graph G(2048); ggml_context* c = G.c;
         TT xv = input2d(c, kVD, N), xa = input2d(c, kAD, Ta);
@@ -228,6 +250,7 @@ bool LtxDit::forward(const LtxDitInput& in, std::vector<float>& videoOut, std::v
         if (!computeGraph(G, err)) return false;
         ggml_backend_tensor_get(ov, vx.data(), 0, vx.size() * 4); ggml_backend_tensor_get(oa, ax.data(), 0, ax.size() * 4);
         ggml_backend_sched_reset(Compute::get().sched);
+        if (keepIt) { if (resident_.size() < (size_t)blocks) resident_.resize(blocks); resident_[b] = bw; }
     }
 
     // ---- output: LayerNorm (no affine) * (1 + scale) + shift, projection to 128 channels, unpatchify
@@ -240,7 +263,7 @@ bool LtxDit::forward(const LtxDitInput& in, std::vector<float>& videoOut, std::v
         TT shift = ggml_reshape_3d(c, ggml_add(c, ei, ggml_cont(c, ggml_view_2d(c, t, dim, 1, t->nb[1], 0))), dim, 1, F2);
         TT scale = ggml_reshape_3d(c, ggml_add(c, ei, ggml_cont(c, ggml_view_2d(c, t, dim, 1, t->nb[1], t->nb[1]))), dim, 1, F2);
         TT y = affine(c, ggml_norm(c, ggml_reshape_3d(c, xi, dim, per, F2), 1e-6f), scale, shift);
-        y = ggml_add(c, ggml_mul_mat(c, w, ggml_reshape_2d(c, y, dim, n)), b);
+        y = ggml_add(c, mm(c, w, ggml_reshape_2d(c, y, dim, n)), b);
         ggml_set_output(y); ggml_build_forward_expand(G.g, y);
         if (!runGraph(G, err)) return false;
         setT(xi, x); setT(ei, emb); if (!computeGraph(G, err)) return false;
@@ -267,6 +290,7 @@ int runLtxDitTest(const std::vector<std::string>& a) {
     LtxWeights w; std::string err; if (!w.open(a[0], err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
     LtxLora lora; const float ls = a.size() > 7 ? (float)atof(a[7].c_str()) : 0.f;           // optional distilled LoRA strength (same file as the reference)
     if (ls > 0) { lora.strength = ls; if (!lora.open("c:\\workenv\\ComfyUI-Easy-Install\\ComfyUI-Easy-Install\\ComfyUI\\models\\loras\\ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors", err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; } w.lora = &lora; }
+    w.cacheQ8 = true;
     LtxDit dit; dit.ckpt = &w; dit.blocks = a.size() > 2 ? atoi(a[2].c_str()) : 2;
     LtxDitInput in; in.F = a.size() > 3 ? atoi(a[3].c_str()) : 3; in.h = a.size() > 4 ? atoi(a[4].c_str()) : 4; in.w = a.size() > 5 ? atoi(a[5].c_str()) : 4; in.T = a.size() > 6 ? atoi(a[6].c_str()) : 10;
     std::vector<float> ctx, ro, rao;
@@ -280,4 +304,9 @@ int runLtxDitTest(const std::vector<std::string>& a) {
     compare("video", vo, ro); compare("audio", ao, rao);
     return 0;
 }
+
+
+
+
+
 

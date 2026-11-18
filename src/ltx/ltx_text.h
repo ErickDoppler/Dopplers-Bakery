@@ -9,9 +9,11 @@
 #include "ltx/ltx_weights.h"
 
 struct LtxTextEncoder {
-    LtxWeights gemma, ckpt;
+    LtxWeights gemmaOwn, ckptOwn;                       // used by open(); a pipeline that keeps the files open between jobs uses openShared()
+    LtxWeights *gemma = &gemmaOwn, *ckpt = &ckptOwn;
     SentencePiece sp;
     bool open(const std::string& gemmaPath, const std::string& ckptPath, std::string& err);
+    bool openShared(LtxWeights* gemmaW, LtxWeights* ckptW, std::string& err);
     // BOS + SentencePiece ids of the raw prompt (what ComfyUI's CLIPTextEncode feeds Gemma: no chat template).
     std::vector<int> tokenize(const std::string& text) const;
     // hidden[layer 0..48] each n x 3840 (token-major): embeddings, the input of every layer, the normed output of the last one

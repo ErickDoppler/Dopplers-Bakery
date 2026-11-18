@@ -21,8 +21,13 @@ struct LtxLora {
 struct LtxWeights {
     StFile file;
     const LtxLora* lora = nullptr;                 // optional, applied by loadF32 to every weight it covers
+    bool cacheQ8 = false;                          // weights() returns Q8_0 copies kept in memory (built on all cores the first time; ~20 GB for the transformer)
+    mutable std::unordered_map<std::string, std::vector<uint8_t>> q8cache;
+    // Q8_0 rows of a weight matrix (cols must be a multiple of 32), quantized from the stored format; the LoRA is NOT applied (it runs in the graph)
+    bool quantizeQ8(const std::string& name, std::vector<uint8_t>& out, int64_t& rows, int64_t& cols, std::string& err) const;
     bool cacheF16 = false;                         // keep the dequantized (+LoRA) matrices as F16 in memory the first time they are used (the 22B transformer is ~37 GB)
     mutable std::unordered_map<std::string, std::vector<uint16_t>> f16cache;
+    const std::vector<uint8_t>* q8(const std::string& name, std::string& err) const;   // cached Q8_0 data of a weight (builds it on first use)
     bool open(const std::string& path, std::string& err) { return file.open(path, err); }
     bool has(const std::string& name) const { return file.find(name) != nullptr; }
     // Logical shape of a tensor (an nvfp4 weight is [rows, cols], the file stores cols / 2 bytes per row).
@@ -36,5 +41,6 @@ struct LtxWeights {
 
 // Exposed for tests: cuBLAS block-scale layout -> row-major scales [rows][cols] (cols = columns / 16).
 void ltxUnswizzleScales(const uint8_t* blocked, int64_t rows, int64_t cols, std::vector<uint8_t>& out);
+
 
 

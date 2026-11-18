@@ -74,14 +74,14 @@ bool encodeStart(const LtxVae& vae, const ImageRgb& img, int lh, int lw, std::ve
 }  // namespace
 
 bool LtxModels::open(const LtxFiles& f, float strength, std::string& err) {
-    if (f.checkpoint == files.checkpoint && f.upscaler == files.upscaler && f.lora == files.lora && strength == loraStrength && !files.checkpoint.empty()) return true;
+    if (f.checkpoint == files.checkpoint && f.upscaler == files.upscaler && f.gemma == files.gemma && f.lora == files.lora && strength == loraStrength && !files.checkpoint.empty()) return true;
     release();
-    if (!ck.open(f.checkpoint, err) || !up.open(f.upscaler, err)) { release(); return false; }
+    if (!ck.open(f.checkpoint, err) || !up.open(f.upscaler, err) || !gemma.open(f.gemma, err)) { release(); return false; }
     if (!f.lora.empty() && strength > 0) { lora.strength = strength; if (!lora.open(f.lora, err)) { release(); return false; } ck.lora = &lora; }
-    ck.cacheF16 = true; files = f; loraStrength = strength;
+    ck.cacheQ8 = true; gemma.cacheQ8 = true; files = f; loraStrength = strength;
     return true;
 }
-void LtxModels::release() { ck.f16cache.clear(); ck.lora = nullptr; ck = LtxWeights(); up = LtxWeights(); lora = LtxLora(); files = LtxFiles(); loraStrength = -1.f; }
+void LtxModels::release() { ck.q8cache.clear(); gemma.q8cache.clear(); ck.lora = nullptr; ck = LtxWeights(); up = LtxWeights(); gemma = LtxWeights(); lora = LtxLora(); files = LtxFiles(); loraStrength = -1.f; }
 
 bool ltxGenerate(LtxModels& models, const LtxGenParams& p, LtxResult& out, const std::function<void(float, const std::string&)>& progress, std::string& err) {
     auto say = [&](float f, const std::string& s) { if (progress) progress(f, s); };
@@ -94,7 +94,7 @@ bool ltxGenerate(LtxModels& models, const LtxGenParams& p, LtxResult& out, const
     // ---- text
     say(0.0f, "encoding the prompt");
     LtxDitInput base; base.frameRate = (float)p.fps;
-    {   LtxTextEncoder te; if (!te.open(files.gemma, files.checkpoint, err)) return false;
+    {   LtxTextEncoder te; if (!te.openShared(&models.gemma, &models.ck, err)) return false;
         const std::vector<int> ids = te.tokenize(p.prompt); const int n = (int)ids.size();
         std::vector<std::vector<float>> hid;
         if (!te.gemmaHidden(ids, hid, [&](int l) { say(0.0f + 0.05f * l / 48.f, "text encoder: layer " + std::to_string(l + 1) + "/48"); }, err)) return false;
@@ -120,6 +120,7 @@ bool ltxGenerate(LtxModels& models, const LtxGenParams& p, LtxResult& out, const
 
     // ---- upscale and stage 2
     int fh = lh, fw = lw;
+    dit.releaseResident();                                           // the upscaler and the decoder need the video memory
     if (p.upscale) {
         say(0.55f, "upscaling the latent");
         LtxUpscaler u; u.model = &up; u.ckpt = &ck;
@@ -141,6 +142,7 @@ bool ltxGenerate(LtxModels& models, const LtxGenParams& p, LtxResult& out, const
     }
 
     // ---- decode
+    dit.releaseResident();
     say(0.92f, "decoding the video");
     Vol lat; lat.T = F; lat.C = 128; lat.H = fh; lat.W = fw; lat.d = swapAB(vid, 128, F, (size_t)fh * fw);
     if (!vae.decode(lat, out.frames, [&](const std::string& s) { say(0.95f, "video decoder: " + s); }, err)) return false;
@@ -169,7 +171,10 @@ int runLtxGenTest(const std::vector<std::string>& a) {
     LtxModels models; if (!models.open(f, p.loraStrength, err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
     LtxResult r; auto t0 = std::chrono::steady_clock::now();
     float last = -1;
+    const int reps = getenv("LTX_REPEAT") ? atoi(getenv("LTX_REPEAT")) : 1;           // run the same job again to see the warm speed
+    for (int rep = 0; rep < reps; rep++) { t0 = std::chrono::steady_clock::now(); last = -1; p.seed += rep;
     if (!ltxGenerate(models, p, r, [&](float fr, const std::string& s) { if (fr - last > 0.002f || fr >= 1.f) { last = fr; fprintf(stderr, "[%5.1f%%] %5.0fs %s\n", fr * 100.f, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), s.c_str()); } }, err)) { fprintf(stderr, "failed: %s\n", err.c_str()); return 1; }
+    }
     for (int t = 0; t < r.frames.T; t += std::max(1, r.frames.T / 8)) {
         std::vector<uint8_t> px((size_t)r.frames.W * r.frames.H * 3);
         for (int y = 0; y < r.frames.H; y++) for (int x = 0; x < r.frames.W; x++) for (int c = 0; c < 3; c++)
@@ -190,5 +195,7 @@ int runLtxGenTest(const std::vector<std::string>& a) {
     printf("%d frames %dx%d, audio latent %d frames\n", r.frames.T, r.frames.W, r.frames.H, r.audioFrames);
     return 0;
 }
+
+
 
 

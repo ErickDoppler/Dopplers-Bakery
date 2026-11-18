@@ -4,6 +4,7 @@
 #include <cstring>
 #include <algorithm>
 #include <thread>
+#include "ggml.h"
 
 static bool endsWith(const std::string& s, const char* suf) { size_t n = strlen(suf); return s.size() >= n && s.compare(s.size() - n, n, suf) == 0; }
 
@@ -137,5 +138,50 @@ int runLtxWeightsTest(const std::vector<std::string>& a) {
         }
     }
     return bad ? 1 : 0;
+}
+
+
+// ---- Q8_0 conversion on all cores, straight from the stored format (BF16 / F16 / F32, FP8 + scale, NVFP4 + scales)
+bool LtxWeights::quantizeQ8(const std::string& name, std::vector<uint8_t>& out, int64_t& rows, int64_t& cols, std::string& err) const {
+    const StTensor* t = file.find(name);
+    if (!t || t->shape.size() != 2) { err = "not a matrix: " + name; return false; }
+    const std::string fmt = formatOf(name);
+    const std::string base = endsWith(name, ".weight") ? name.substr(0, name.size() - 7) : name;
+    rows = t->shape[0]; cols = fmt == "nvfp4" ? t->shape[1] * 2 : t->shape[1];
+    if (cols % 32) { err = "columns not a multiple of 32: " + name; return false; }
+    const size_t rowBytes = ggml_row_size(GGML_TYPE_Q8_0, cols);
+    out.resize((size_t)rows * rowBytes);
+    float s1 = 1.0f; std::vector<uint8_t> sc; float lut[256]; static const float e2m1[16] = {0.f, 0.5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f, -0.f, -0.5f, -1.f, -1.5f, -2.f, -3.f, -4.f, -6.f};
+    for (int i = 0; i < 256; i++) lut[i] = fp8e4m3ToF32((uint8_t)i);
+    const int64_t nb = cols / 16;
+    if (fmt == "fp8") { if (file.find(base + ".weight_scale")) file.scalar(base + ".weight_scale", s1); }
+    else if (fmt == "nvfp4") { const StTensor* bs = file.find(base + ".weight_scale"); if (!bs) { err = "no block scales: " + name; return false; } file.scalar(base + ".weight_scale_2", s1); ltxUnswizzleScales(bs->data, rows, nb, sc); }
+    ggml_quantize_init(GGML_TYPE_Q8_0);
+    const int nt = (int)std::max(1u, std::thread::hardware_concurrency());
+    auto work = [&](int64_t r0, int64_t r1) {
+        std::vector<float> row((size_t)cols);
+        for (int64_t r = r0; r < r1; r++) {
+            if (fmt == "nvfp4") {
+                const uint8_t* q = t->data + r * t->shape[1];
+                for (int64_t b = 0; b < nb; b++) { const float scale = s1 * lut[sc[(size_t)(r * nb + b)]]; for (int k = 0; k < 8; k++) { const uint8_t v = q[b * 8 + k]; row[b * 16 + k * 2] = e2m1[v >> 4] * scale; row[b * 16 + k * 2 + 1] = e2m1[v & 15] * scale; } }
+            } else if (t->dtype == "F8_E4M3") { const uint8_t* q = t->data + r * cols; for (int64_t i = 0; i < cols; i++) row[i] = lut[q[i]] * s1; }
+            else if (t->dtype == "BF16") { const uint16_t* q = (const uint16_t*)t->data + r * cols; for (int64_t i = 0; i < cols; i++) row[i] = bf16ToF32(q[i]); }
+            else if (t->dtype == "F16") { const uint16_t* q = (const uint16_t*)t->data + r * cols; for (int64_t i = 0; i < cols; i++) row[i] = f16ToF32(q[i]); }
+            else { memcpy(row.data(), t->data + r * cols * 4, (size_t)cols * 4); }
+            ggml_quantize_chunk(GGML_TYPE_Q8_0, row.data(), out.data() + (size_t)r * rowBytes, 0, 1, cols, nullptr);
+        }
+    };
+    std::vector<std::thread> th;
+    for (int i = 0; i < nt; i++) th.emplace_back(work, rows * i / nt, rows * (i + 1) / nt);
+    for (auto& x : th) x.join();
+    return true;
+}
+
+const std::vector<uint8_t>* LtxWeights::q8(const std::string& name, std::string& err) const {
+    auto it = q8cache.find(name);
+    if (it != q8cache.end()) return &it->second;
+    std::vector<uint8_t> d; int64_t r = 0, c = 0;
+    if (!quantizeQ8(name, d, r, c, err)) return nullptr;
+    return &(q8cache[name] = std::move(d));
 }
 

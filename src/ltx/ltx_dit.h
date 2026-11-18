@@ -1,8 +1,9 @@
-// LTX-2.3 audio+video transformer (48 blocks, video stream 4096 wide, audio stream 2048 wide) on ggml.
+﻿// LTX-2.3 audio+video transformer (48 blocks, video stream 4096 wide, audio stream 2048 wide) on ggml.
 // Every block runs as one graph with its weights uploaded just before (F16); activations stay on the host between blocks.
 // First version: explicit attention (small token counts), exact math checked against ComfyUI's LTXAVModel.
 #pragma once
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 #include "ltx/ltx_weights.h"
@@ -21,8 +22,11 @@ struct LtxDitInput {
 struct LtxDit {
     const LtxWeights* ckpt = nullptr;
     int blocks = 48;                           // fewer blocks only for tests
+    std::vector<std::shared_ptr<void>> resident_;   // blocks kept in video memory between steps (what fits)
+    void releaseResident() { resident_.clear(); }
     // velocity predictions, same layouts as the inputs
     bool forward(const LtxDitInput& in, std::vector<float>& videoOut, std::vector<float>& audioOut, const std::function<void(int)>& progress, std::string& err);
 };
 
 int runLtxDitTest(const std::vector<std::string>& args);      // ltx-dit <ckpt> <reference dir> [blocks F h w audioTokens]
+

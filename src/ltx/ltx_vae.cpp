@@ -49,7 +49,7 @@ Vol patchify(const Vol& x, int q) {                             // "b c (h q) (w
 
 // run `build` (x: input volume as a [W,H,C,T] tensor) as one graph and return the result volume
 template <class F> bool runVol(const Vol& in, Vol& out, int outC, int outT, F build, std::string& err) {
-    Graph G(4096); ggml_context* c = G.c;
+    Graph G(16384); ggml_context* c = G.c;
     TT x = ggml_new_tensor_4d(c, GGML_TYPE_F32, in.W, in.H, in.C, in.T); ggml_set_input(x);
     TT y = build(c, x);
     ggml_set_output(y); ggml_build_forward_expand(G.g, y);

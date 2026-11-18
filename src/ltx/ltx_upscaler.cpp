@@ -27,7 +27,7 @@ TT resBlock(ggml_context* c, const Res& r, TT x) {
     return ggml_silu(c, ggml_add(c, h, x));
 }
 template <class F> bool runVol(const Vol& in, Vol& out, F build, std::string& err) {
-    Graph G(2048); ggml_context* c = G.c;
+    Graph G(8192); ggml_context* c = G.c;
     TT x = ggml_new_tensor_4d(c, GGML_TYPE_F32, in.W, in.H, in.C, in.T); ggml_set_input(x);
     TT y = build(c, x); ggml_set_output(y); ggml_build_forward_expand(G.g, y);
     if (!runGraph(G, err)) return false;

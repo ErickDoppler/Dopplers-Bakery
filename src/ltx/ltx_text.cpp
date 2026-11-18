@@ -1,4 +1,4 @@
-#include "ltx/ltx_text.h"
+﻿#include "ltx/ltx_text.h"
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -15,8 +15,15 @@ using namespace ltxg;
 namespace { constexpr int kHid = 3840, kFF = 15360, kHeads = 16, kKv = 8, kHd = 256, kLayers = 48; }
 
 bool LtxTextEncoder::open(const std::string& gemmaPath, const std::string& ckptPath, std::string& err) {
-    if (!gemma.open(gemmaPath, err) || !ckpt.open(ckptPath, err)) return false;
-    const StTensor* sp_ = gemma.file.find("spiece_model");
+    gemma = &gemmaOwn; ckpt = &ckptOwn;
+    if (!gemma->open(gemmaPath, err) || !ckpt->open(ckptPath, err)) return false;
+    gemma->cacheQ8 = ckpt->cacheQ8 = true;
+    return openShared(gemma, ckpt, err);
+}
+
+bool LtxTextEncoder::openShared(LtxWeights* gemmaW, LtxWeights* ckptW, std::string& err) {
+    gemma = gemmaW; ckpt = ckptW;
+    const StTensor* sp_ = gemma->file.find("spiece_model");
     if (!sp_) { err = "spiece_model not found in the Gemma file"; return false; }
     return sp.load(std::string((const char*)sp_->data, (size_t)sp_->bytes), err);
 }
@@ -32,7 +39,7 @@ bool LtxTextEncoder::gemmaHidden(const std::vector<int>& ids, std::vector<std::v
     if (n < 1) { err = "empty prompt"; return false; }
     if (!Compute::get().init(0, err)) return false;
     hidden.assign(kLayers + 1, std::vector<float>());
-    const StTensor* et = gemma.file.find("model.embed_tokens.weight");
+    const StTensor* et = gemma->file.find("model.embed_tokens.weight");
     if (!et) { err = "missing embed_tokens"; return false; }
     std::vector<float> x((size_t)n * kHid);
     for (int i = 0; i < n; i++) {
@@ -55,11 +62,11 @@ bool LtxTextEncoder::gemmaHidden(const std::vector<int>& ids, std::vector<std::v
         if (progress) progress(L);
         const std::string p = "model.layers." + std::to_string(L) + ".";
         WeightSet W;
-        TT q = W.mat(gemma, p + "self_attn.q_proj.weight", err), k = W.mat(gemma, p + "self_attn.k_proj.weight", err), v = W.mat(gemma, p + "self_attn.v_proj.weight", err);
-        TT o = W.mat(gemma, p + "self_attn.o_proj.weight", err), gt = W.mat(gemma, p + "mlp.gate_proj.weight", err), up = W.mat(gemma, p + "mlp.up_proj.weight", err), dn = W.mat(gemma, p + "mlp.down_proj.weight", err);
-        TT n1 = W.vec(gemma, p + "input_layernorm.weight", err, 1.f), n2 = W.vec(gemma, p + "post_attention_layernorm.weight", err, 1.f);
-        TT n3 = W.vec(gemma, p + "pre_feedforward_layernorm.weight", err, 1.f), n4 = W.vec(gemma, p + "post_feedforward_layernorm.weight", err, 1.f);
-        TT qn = W.vec(gemma, p + "self_attn.q_norm.weight", err, 1.f), kn = W.vec(gemma, p + "self_attn.k_norm.weight", err, 1.f);
+        TT q = W.mat(*gemma, p + "self_attn.q_proj.weight", err), k = W.mat(*gemma, p + "self_attn.k_proj.weight", err), v = W.mat(*gemma, p + "self_attn.v_proj.weight", err);
+        TT o = W.mat(*gemma, p + "self_attn.o_proj.weight", err), gt = W.mat(*gemma, p + "mlp.gate_proj.weight", err), up = W.mat(*gemma, p + "mlp.up_proj.weight", err), dn = W.mat(*gemma, p + "mlp.down_proj.weight", err);
+        TT n1 = W.vec(*gemma, p + "input_layernorm.weight", err, 1.f), n2 = W.vec(*gemma, p + "post_attention_layernorm.weight", err, 1.f);
+        TT n3 = W.vec(*gemma, p + "pre_feedforward_layernorm.weight", err, 1.f), n4 = W.vec(*gemma, p + "post_feedforward_layernorm.weight", err, 1.f);
+        TT qn = W.vec(*gemma, p + "self_attn.q_norm.weight", err, 1.f), kn = W.vec(*gemma, p + "self_attn.k_norm.weight", err, 1.f);
         if (!err.empty() || !W.upload(err)) return false;
         const bool global = L % 6 == 5;
         Graph G(512); ggml_context* c = G.c;
@@ -67,7 +74,7 @@ bool LtxTextEncoder::gemmaHidden(const std::vector<int>& ids, std::vector<std::v
         TT pt = ggml_new_tensor_1d(c, GGML_TYPE_I32, n); ggml_set_input(pt);
         TT mk = ggml_new_tensor_2d(c, GGML_TYPE_F16, n, (n + 63) / 64 * 64); ggml_set_input(mk);
         TT h = ggml_mul(c, ggml_rms_norm(c, in, 1e-6f), n1);
-        TT Q = ggml_reshape_3d(c, ggml_mul_mat(c, q, h), kHd, kHeads, n), K = ggml_reshape_3d(c, ggml_mul_mat(c, k, h), kHd, kKv, n), V = ggml_reshape_3d(c, ggml_mul_mat(c, v, h), kHd, kKv, n);
+        TT Q = ggml_reshape_3d(c, mm(c, q, h), kHd, kHeads, n), K = ggml_reshape_3d(c, mm(c, k, h), kHd, kKv, n), V = ggml_reshape_3d(c, mm(c, v, h), kHd, kKv, n);
         Q = ggml_mul(c, ggml_rms_norm(c, Q, 1e-6f), qn); K = ggml_mul(c, ggml_rms_norm(c, K, 1e-6f), kn);
         const float base = global ? 1000000.f : 10000.f, fscale = global ? 1.f / 8.f : 1.f;
         Q = ggml_rope_ext(c, Q, pt, nullptr, kHd, GGML_ROPE_TYPE_NEOX, 0, base, fscale, 0.f, 1.f, 32.f, 1.f);
@@ -76,10 +83,10 @@ bool LtxTextEncoder::gemmaHidden(const std::vector<int>& ids, std::vector<std::v
         TT sc = ggml_soft_max_ext(c, ggml_mul_mat(c, Kp, Qp), mk, 1.0f / 16.0f, 0.f);                  // [keys, queries, 16], GQA by broadcast
         TT Vp = ggml_cont(c, ggml_permute(c, V, 1, 2, 0, 3));                                          // [keys, 256, 8]
         TT a = ggml_cont(c, ggml_permute(c, ggml_mul_mat(c, Vp, sc), 0, 2, 1, 3));                     // [256, 16, n]
-        a = ggml_mul_mat(c, o, ggml_reshape_2d(c, a, kHeads * kHd, n));
+        a = mm(c, o, ggml_reshape_2d(c, a, kHeads * kHd, n));
         TT r = ggml_add(c, in, ggml_mul(c, ggml_rms_norm(c, a, 1e-6f), n2));
         TT f = ggml_mul(c, ggml_rms_norm(c, r, 1e-6f), n3);
-        TT m = ggml_mul_mat(c, dn, ggml_mul(c, ggml_gelu(c, ggml_mul_mat(c, gt, f)), ggml_mul_mat(c, up, f)));
+        TT m = mm(c, dn, ggml_mul(c, ggml_gelu(c, mm(c, gt, f)), mm(c, up, f)));
         TT out = ggml_add(c, r, ggml_mul(c, ggml_rms_norm(c, m, 1e-6f), n4));
         ggml_set_output(out); ggml_build_forward_expand(G.g, out);
         if (!runGraph(G, err)) return false;
@@ -92,7 +99,7 @@ bool LtxTextEncoder::gemmaHidden(const std::vector<int>& ids, std::vector<std::v
         ggml_backend_sched_reset(Compute::get().sched);
         if (L + 1 < kLayers) hidden[L + 1] = x;
     }
-    const std::vector<float> nw = [&] { std::vector<float> w; gemma.loadF32("model.norm.weight", w, err); return w; }();
+    const std::vector<float> nw = [&] { std::vector<float> w; gemma->loadF32("model.norm.weight", w, err); return w; }();
     if (nw.empty()) return false;
     hidden[kLayers].resize(x.size());
     for (int i = 0; i < n; i++) rmsNormRow(&x[(size_t)i * kHid], &hidden[kLayers][(size_t)i * kHid], kHid, nw.data(), 1.f, 1e-6f);
@@ -112,11 +119,11 @@ bool LtxTextEncoder::project(const std::vector<std::vector<float>>& hidden, int 
     for (int which = 0; which < 2; which++) {
         const int outDim = which == 0 ? 4096 : 2048;
         const std::string base = std::string("text_embedding_projection.") + (which == 0 ? "video" : "audio") + "_aggregate_embed.";
-        WeightSet W; TT w = W.mat(ckpt, base + "weight", err), b = W.vec(ckpt, base + "bias", err);
+        WeightSet W; TT w = W.mat(*ckpt, base + "weight", err), b = W.vec(*ckpt, base + "bias", err);
         if (!err.empty() || !W.upload(err)) return false;
         Graph G(32); ggml_context* c = G.c;
         TT x = ggml_new_tensor_2d(c, GGML_TYPE_F32, in, n); ggml_set_input(x);
-        TT y = ggml_add(c, ggml_mul_mat(c, w, ggml_scale(c, x, std::sqrt((float)outDim / kHid))), b);
+        TT y = ggml_add(c, mm(c, w, ggml_scale(c, x, std::sqrt((float)outDim / kHid))), b);
         ggml_set_output(y); ggml_build_forward_expand(G.g, y);
         if (!runGraph(G, err)) return false;
         ggml_backend_tensor_set(x, feat.data(), 0, feat.size() * 4);
@@ -133,7 +140,7 @@ bool LtxTextEncoder::connector(bool video, const std::vector<float>& in, int n, 
     const std::string P = std::string("model.diffusion_model.") + (video ? "video" : "audio") + "_embeddings_connector.";
     const int tile = (std::max(1024, n) + 127) / 128;
     L = tile * 128;
-    std::vector<float> reg; if (!ckpt.loadF32(P + "learnable_registers", reg, err)) return false;
+    std::vector<float> reg; if (!ckpt->loadF32(P + "learnable_registers", reg, err)) return false;
     std::vector<float> x((size_t)L * dim);
     memcpy(x.data(), in.data(), (size_t)n * dim * 4);
     for (int t = n; t < L; t++) memcpy(&x[(size_t)t * dim], &reg[(size_t)(t % 128) * dim], (size_t)dim * 4);
@@ -152,10 +159,10 @@ bool LtxTextEncoder::connector(bool video, const std::vector<float>& in, int n, 
     for (int blk = 0; blk < 8; blk++) {
         const std::string b = P + "transformer_1d_blocks." + std::to_string(blk) + ".";
         WeightSet W;
-        TT wq = W.mat(ckpt, b + "attn1.to_q.weight", err), bq = W.vec(ckpt, b + "attn1.to_q.bias", err), wk = W.mat(ckpt, b + "attn1.to_k.weight", err), bk = W.vec(ckpt, b + "attn1.to_k.bias", err);
-        TT wv = W.mat(ckpt, b + "attn1.to_v.weight", err), bv = W.vec(ckpt, b + "attn1.to_v.bias", err), wo = W.mat(ckpt, b + "attn1.to_out.0.weight", err), bo = W.vec(ckpt, b + "attn1.to_out.0.bias", err);
-        TT qn = W.vec(ckpt, b + "attn1.q_norm.weight", err), kn = W.vec(ckpt, b + "attn1.k_norm.weight", err), wg = W.mat(ckpt, b + "attn1.to_gate_logits.weight", err), bg = W.vec(ckpt, b + "attn1.to_gate_logits.bias", err);
-        TT w1 = W.mat(ckpt, b + "ff.net.0.proj.weight", err), b1 = W.vec(ckpt, b + "ff.net.0.proj.bias", err), w2 = W.mat(ckpt, b + "ff.net.2.weight", err), b2 = W.vec(ckpt, b + "ff.net.2.bias", err);
+        TT wq = W.mat(*ckpt, b + "attn1.to_q.weight", err), bq = W.vec(*ckpt, b + "attn1.to_q.bias", err), wk = W.mat(*ckpt, b + "attn1.to_k.weight", err), bk = W.vec(*ckpt, b + "attn1.to_k.bias", err);
+        TT wv = W.mat(*ckpt, b + "attn1.to_v.weight", err), bv = W.vec(*ckpt, b + "attn1.to_v.bias", err), wo = W.mat(*ckpt, b + "attn1.to_out.0.weight", err), bo = W.vec(*ckpt, b + "attn1.to_out.0.bias", err);
+        TT qn = W.vec(*ckpt, b + "attn1.q_norm.weight", err), kn = W.vec(*ckpt, b + "attn1.k_norm.weight", err), wg = W.mat(*ckpt, b + "attn1.to_gate_logits.weight", err), bg = W.vec(*ckpt, b + "attn1.to_gate_logits.bias", err);
+        TT w1 = W.mat(*ckpt, b + "ff.net.0.proj.weight", err), b1 = W.vec(*ckpt, b + "ff.net.0.proj.bias", err), w2 = W.mat(*ckpt, b + "ff.net.2.weight", err), b2 = W.vec(*ckpt, b + "ff.net.2.bias", err);
         if (!err.empty() || !W.upload(err)) return false;
         Graph G(256); ggml_context* c = G.c;
         TT xin = ggml_new_tensor_2d(c, GGML_TYPE_F32, dim, L); ggml_set_input(xin);
@@ -167,18 +174,18 @@ bool LtxTextEncoder::connector(bool video, const std::vector<float>& in, int n, 
             return ggml_concat(c, o1, o2, 0);
         };
         TT h = ggml_rms_norm(c, xin, 1e-6f);
-        TT q = ggml_mul(c, ggml_rms_norm(c, ggml_add(c, ggml_mul_mat(c, wq, h), bq), 1e-5f), qn), k = ggml_mul(c, ggml_rms_norm(c, ggml_add(c, ggml_mul_mat(c, wk, h), bk), 1e-5f), kn);
-        TT v = ggml_add(c, ggml_mul_mat(c, wv, h), bv);
+        TT q = ggml_mul(c, ggml_rms_norm(c, ggml_add(c, mm(c, wq, h), bq), 1e-5f), qn), k = ggml_mul(c, ggml_rms_norm(c, ggml_add(c, mm(c, wk, h), bk), 1e-5f), kn);
+        TT v = ggml_add(c, mm(c, wv, h), bv);
         q = rope(ggml_reshape_3d(c, q, hd, heads, L)); k = rope(ggml_reshape_3d(c, k, hd, heads, L)); v = ggml_reshape_3d(c, v, hd, heads, L);
         TT qp = ggml_permute(c, q, 0, 2, 1, 3), kp = ggml_permute(c, k, 0, 2, 1, 3);                   // [hd, L, heads]
         TT sc = ggml_soft_max_ext(c, ggml_mul_mat(c, kp, qp), nullptr, 1.0f / std::sqrt((float)hd), 0.f);
         TT vp = ggml_cont(c, ggml_permute(c, v, 1, 2, 0, 3));                                          // [keys, hd, heads]
         TT a = ggml_cont(c, ggml_permute(c, ggml_mul_mat(c, vp, sc), 0, 2, 1, 3));                     // [hd, heads, L]
-        TT gate = ggml_scale(c, ggml_sigmoid(c, ggml_add(c, ggml_mul_mat(c, wg, h), bg)), 2.0f);        // [heads, L]
+        TT gate = ggml_scale(c, ggml_sigmoid(c, ggml_add(c, mm(c, wg, h), bg)), 2.0f);        // [heads, L]
         a = ggml_mul(c, a, ggml_reshape_3d(c, gate, 1, heads, L));
-        TT att = ggml_add(c, ggml_mul_mat(c, wo, ggml_reshape_2d(c, a, dim, L)), bo);
+        TT att = ggml_add(c, mm(c, wo, ggml_reshape_2d(c, a, dim, L)), bo);
         TT r = ggml_add(c, xin, att);
-        TT f = ggml_add(c, ggml_mul_mat(c, w2, ggml_gelu(c, ggml_add(c, ggml_mul_mat(c, w1, ggml_rms_norm(c, r, 1e-6f)), b1))), b2);
+        TT f = ggml_add(c, mm(c, w2, ggml_gelu(c, ggml_add(c, mm(c, w1, ggml_rms_norm(c, r, 1e-6f)), b1))), b2);
         TT y = ggml_add(c, r, f);
         if (blk == 7) y = ggml_rms_norm(c, y, 1e-6f);
         ggml_set_output(y); ggml_build_forward_expand(G.g, y);
@@ -236,3 +243,4 @@ int runLtxTextTest(const std::vector<std::string>& a) {
     }
     return 0;
 }
+
