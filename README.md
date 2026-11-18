@@ -1,4 +1,4 @@
-# Dopplers Bakery
+﻿# Dopplers Bakery
 
 An offline studio for **chat, images, music, sound effects and speech** on your own Windows PC.
 A native C++ app (ggml / llama.cpp), no Python, no ComfyUI, no cloud. Talk to the assistant and it makes pictures, audio and a spoken reply; edit your own pictures; use the same chat from a browser.
@@ -10,8 +10,8 @@ A native C++ app (ggml / llama.cpp), no Python, no ComfyUI, no cloud. Talk to th
 ![Text to image tab with image-to-image, size sliders and the results list](docs/screenshot-image.png)
 
 > ## ⚠️ Read this first: the app downloads gigabytes of data
-> The program itself is small (~70 MB), but it **does not contain any AI models**. To work it needs about **36 GB** of model files
-> (all features ≈ 36 GB; images only ≈ 18.6 GB; speech only ≈ 4.5 GB). On first launch it offers to download them from Hugging Face
+> The program itself is small (~70 MB), but it **does not contain any AI models**. To work it needs model files: about **36 GB** for chat, speech, images and audio,
+> and another **42 GB** for the video tab (all features ≈ 78 GB; images only ≈ 18.6 GB; speech only ≈ 4.5 GB; video only ≈ 42 GB). On first launch it offers to download them from Hugging Face
 > (resumable). Make sure you have **free disk space, an unmetered connection and time**. A GPU with 8 GB+ VRAM (Vulkan) is recommended;
 > without a GPU it runs on the CPU, much more slowly.
 
@@ -20,13 +20,13 @@ A native C++ app (ggml / llama.cpp), no Python, no ComfyUI, no cloud. Talk to th
 - **Audio in chat has no length limit of its own**: say "2 minutes" or "45 seconds" and you get exactly that (up to the model's 380 s, with a note if more is asked); if you give no length the app picks a random one: songs 90-320 s, one-shots 4-30 s, sound effects 1-10 s.
 - **Pictures in chat**: attach with the **+** button, drag & drop, or Ctrl+V; then say how to change it (image-to-image).
 - **Chat in the browser**: the same chat on `http://127.0.0.1:8787` (menu *Web*), images and sound play in the page. *Share on the local network* is opt-in and protected by a secret key in the link.
-- **Tabs**: LLM (Qwen), TTS (Qwen3-TTS, incl. voice cloning with the Base model), Text to image (Krea 2, image-to-image), Audio (Stable Audio 3, MP3/WAV).
+- **Tabs**: LLM (Qwen), TTS (Qwen3-TTS, incl. voice cloning with the Base model), Text to image (Krea 2, image-to-image), Audio (Stable Audio 3, MP3/WAV), **Text/Image to video** (LTX-2.3: video and sound together, saved as an MP4; optional start image; 8 + 3 steps with the distilled LoRA and a x2 upscaler).
 - Job **queue** with columns `#` | `Tab` | `Progress` (percent, then Done / Failed) | `Speed / size / length` (tokens per second, image size or audio length) | `Time`; click a job to see its prompt and details. The title counts the jobs (running / waiting / done), click a column header to sort, the list keeps its scroll position and follows the running job. Pause, cancel, reorder; hide the panel, drag its edge to resize it, resize its columns.
 - **Audio tab**: the length trackbar goes up to 5 minutes for every kind of sound, and the **Extend...** button next to it opens a number field for any length up to what the model can make (380 s). A player under the list (Prev / Play-Pause / Stop / Next, position bar, name and time of what is playing, stop works even after the list was cleared) and keyboard shortcuts: **F2** generate, **F3** play / stop the newest result, **Shift+Delete** delete the selected result and its file (to the Recycle Bin). Audio in the chat has a position bar you can drag.
 - Command line mode; models are plain files you can reuse from ComfyUI folders.
 
 ## Requirements
-- Windows 10/11 64-bit, CPU with AVX2 (2013+), ~36 GB free disk space, 16 GB+ RAM recommended.
+- Windows 10/11 64-bit, CPU with AVX2 (2013+), ~36 GB free disk space (~78 GB with the video models), 16 GB+ RAM (the video tab keeps about 25 GB of weights in memory after its first job: 64 GB+ RAM recommended for it), a GPU with 12 GB VRAM for the video tab.
 - GPU with current Vulkan drivers (NVIDIA / AMD / Intel) for usable speed. Measured on an RTX 3080 Ti: about 1.5 s per image step at 720×720; 20 s of audio in about 8 s (after the models are loaded).
 - **Image size limit on Vulkan:** the built-in Vulkan backend renders correctly up to about 1264 x 1264 px (a limit of the Vulkan driver path: above roughly 6500 DiT tokens the picture turns to noise). Larger requests are reduced automatically. For bigger images install the optional **CUDA libraries** (NVIDIA GPU, about 0.45 GB, downloaded from the llama.cpp release the app was built with): tick the *CUDA libraries* row in **Models > Download models** (or press *Download CUDA libraries* in any tab's *Model settings*), then restart the app. After that the *Text to image* tab has a **Backend** selector (Vulkan = faster for normal sizes, CUDA = any size, e.g. 2000 x 2000) and the Width/Height sliders follow the choice. The **chat** uses CUDA automatically when it is installed; without CUDA it tells you the cap (1264 x 1264) and sizes the picture down on its own, keeping the aspect ratio. Command line: `DopplersBakery.exe cuda-install`, `image --backend CUDA`.
 
@@ -47,7 +47,11 @@ The app reads **three kinds of model files**: `.gguf` (language model), `.safete
 | Images | VAE | `qwen_image_vae.safetensors` | `.safetensors` | 0.25 GB | `models\vae\` | [link](https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors) |
 | Audio | audio model | `stable_audio_3_medium.safetensors` | `.safetensors` | 9.2 GB | `models\checkpoints\` | [link](https://huggingface.co/Comfy-Org/stable-audio-3/resolve/main/checkpoints/stable_audio_3_medium.safetensors) |
 | Audio | text encoder | `t5gemma_b_b_ul2.safetensors` | `.safetensors` | 1.2 GB | `models\text_encoders\` | [link](https://huggingface.co/Comfy-Org/stable-audio-3/resolve/main/text_encoders/t5gemma_b_b_ul2.safetensors) |
-| **Total** | | | | **≈ 36.1 GB** | | |
+| Video | LTX-2.3 model (video, audio, VAEs, vocoder) | `ltx-2.3-22b-dev-fp8.safetensors` | `.safetensors` | 29.1 GB | `models\checkpoints\` | [link](https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/ltx-2.3-22b-dev-fp8.safetensors) |
+| Video | text encoder | `gemma_3_12B_it_fp4_mixed.safetensors` | `.safetensors` | 9.4 GB | `models\text_encoders\` | [link](https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors) |
+| Video | spatial upscaler x2 | `ltx-2.3-spatial-upscaler-x2-1.1.safetensors` | `.safetensors` | 1.0 GB | `models\latent_upscale_models\` | [link](https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.1.safetensors) |
+| Video | distilled LoRA | `ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors` | `.safetensors` | 2.7 GB | `models\loras\` | [link](https://huggingface.co/Comfy-Org/ltx-2.3/resolve/main/split_files/loras/ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors) |
+| **Total** | | | | **≈ 78.4 GB** (36.1 without video) | | |
 
 Optional:
 - The standard, safety-tuned Qwen model instead of the abliterated one: [`Qwen3-4B-Instruct-2507-Q4_K_M.gguf`](https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf) (2.5 GB). It declines some requests; any other `.gguf` chat model also works (pick it in the LLM tab). Models are third-party: check each licence and use them responsibly.
@@ -86,3 +90,4 @@ Re-implementations of the ComfyUI graphs on ggml, validated against reference te
 
 ## License
 Free for **personal use**; **enterprise / organizational use requires a paid license of US$100 per workstation** that launches the app. Source-available, not open source. See [LICENSE](LICENSE) for the exact terms (contact: the repository owner on GitHub). The AI models are not covered by this license and have their own terms; llama.cpp / ggml is MIT-licensed.
+

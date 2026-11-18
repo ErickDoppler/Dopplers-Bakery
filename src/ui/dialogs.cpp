@@ -1,4 +1,4 @@
-#include "ui/dialogs.h"
+﻿#include "ui/dialogs.h"
 #include <commctrl.h>
 #include "core/cuda_libs.h"
 #include "core/download.h"
@@ -152,6 +152,12 @@ struct DownloadDlg : Modal {
     HWND list = nullptr, bar = nullptr, status = nullptr, go = nullptr, skip = nullptr, search = nullptr;
     Downloader dl;
 
+    void updateTotal() {                                  // "5 files selected, 75 GB to download"
+        if (!status || running) return;
+        unsigned long long need = 0; int n = 0;
+        for (size_t i = 0; i < cat.size(); i++) if (ListView_GetCheckState(list, (int)i) && cat[i].downloadable()) { need += cat[i].approxBytes; n++; }
+        uiSetText(status, n ? std::to_string(n) + " selected, " + sys::humanSize(need) + " to download. Untick what you do not need." : "Nothing to download.");
+    }
     void refreshRows() {
         ListView_DeleteAllItems(list);
         for (size_t i = 0; i < cat.size(); i++) {
@@ -196,12 +202,13 @@ struct DownloadDlg : Modal {
                   : "Models available for download. They are saved to the models folder next to the program.", SS_LEFT), 14, 12, W - 28, 36);
         list = uiMake(hwnd, WC_LISTVIEWW, "", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_TABSTOP, 10, WS_EX_CLIENTEDGE);
         ListView_SetExtendedListViewStyle(list, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT);
-        const wchar_t* cols[] = {L"Model", L"Tab", L"Size", L"State"}; int cw[] = {330, 110, 100, 110};
+        const wchar_t* cols[] = {L"Model", L"Tab", L"Size", L"State"}; int cw[] = {300, 150, 90, 100};
         for (int i = 0; i < 4; i++) { LVCOLUMNW c = {}; c.mask = LVCF_TEXT | LVCF_WIDTH; c.pszText = (LPWSTR)cols[i]; c.cx = cw[i]; ListView_InsertColumn(list, i, &c); }
         uiPlace(list, 14, 54, W - 28, 230);
         refreshRows();
         status = uiMake(hwnd, L"STATIC", "", SS_LEFT | SS_ENDELLIPSIS);
         uiPlace(status, 14, 294, W - 28, 18);
+        updateTotal();
         bar = uiMake(hwnd, PROGRESS_CLASSW, "", PBS_SMOOTH);
         SendMessageW(bar, PBM_SETRANGE32, 0, 1000);
         uiPlace(bar, 14, 316, W - 28, 20);
@@ -218,6 +225,15 @@ struct DownloadDlg : Modal {
             for (size_t i = 0; i < cat.size(); i++) if (ListView_GetCheckState(list, (int)i) && cat[i].downloadable()) pick.push_back(cat[i]);
             bool cuda = ListView_GetCheckState(list, (int)cat.size()) && !cudaLibsInstalled();
             if (pick.empty() && !cuda) { uiSetText(status, "Nothing downloadable is checked."); return; }
+            {   // enough room on the drive of the models folder? (a half-finished 30 GB download is a bad way to find out)
+                unsigned long long need = 0; for (auto& e : pick) need += e.approxBytes;
+                sys::makeDirs(sys::modelsDir());
+                ULARGE_INTEGER freeB = {}, totB = {}, anyB = {};
+                if (GetDiskFreeSpaceExW(sys::widen(sys::modelsDir()).c_str(), &freeB, &totB, &anyB) && freeB.QuadPart < need + (1ull << 30)) {
+                    uiSetText(status, "Not enough free disk space: " + sys::humanSize(need) + " needed, " + sys::humanSize(freeB.QuadPart) + " free. Uncheck some models.");
+                    return;
+                }
+            }
             running = true; any = true; wantCuda = cuda; cudaActive = false;
             uiSetText(go, "Working..."); EnableWindow(go, FALSE); EnableWindow(search, FALSE); uiSetText(skip, "Cancel");
             if (!pick.empty()) dl.start(pick); else startCuda();
@@ -305,3 +321,4 @@ bool askNumber(HWND parent, const std::string& title, const std::string& prompt,
     if (d.ok) out = d.value;
     return d.ok;
 }
+

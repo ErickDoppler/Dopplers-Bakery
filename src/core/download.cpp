@@ -51,9 +51,23 @@ std::vector<CatEntry> loadCatalog() {
     c.push_back(one("image-qwen3vl", "Qwen3-VL 4B text encoder for Krea2 (FP8)", Kind::Image,
         "https://huggingface.co/AlperKTS/Krea2_FP8/resolve/main/qwen3vl_4b_fp8_scaled.safetensors",
         "text_encoders/qwen3vl_4b_fp8_scaled.safetensors", 5242467968ull));
+    // Video (LTX-2.3, the files of the VIDEO_WORKFLOW template; the sizes were checked against the servers)
+    c.push_back(one("video-ltx-checkpoint", "LTX-2.3 22B video + audio model (FP8)", Kind::Video,
+        "https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/ltx-2.3-22b-dev-fp8.safetensors",
+        "checkpoints/ltx-2.3-22b-dev-fp8.safetensors", 29145431166ull));
+    c.push_back(one("video-gemma", "Gemma 3 12B text encoder for LTX-2.3 (FP4 mixed)", Kind::Video,
+        "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors",
+        "text_encoders/gemma_3_12B_it_fp4_mixed.safetensors", 9447702218ull));
+    c.push_back(one("video-upscaler", "LTX-2.3 spatial upscaler x2", Kind::Video,
+        "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+        "latent_upscale_models/ltx-2.3-spatial-upscaler-x2-1.1.safetensors", 995743560ull));
+    c.push_back(one("video-lora", "LTX-2.3 distilled LoRA (8 steps)", Kind::Video,
+        "https://huggingface.co/Comfy-Org/ltx-2.3/resolve/main/split_files/loras/ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors",
+        "loras/ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors", 2741024390ull));
     {   // which [Settings] slot each built-in entry fills
         static const char* roles[][2] = {{"llm-qwen3-4b", "model"}, {"tts-qwen3-custom", "model"}, {"audio-sa3-medium", "model"}, {"audio-t5gemma", "clip"},
-                                         {"image-qwen-vae", "vae"}, {"image-krea2", "model"}, {"image-qwen3vl", "clip"}};
+                                         {"image-qwen-vae", "vae"}, {"image-krea2", "model"}, {"image-qwen3vl", "clip"},
+                                         {"video-ltx-checkpoint", "model"}, {"video-gemma", "clip"}, {"video-upscaler", "upscaler"}, {"video-lora", "lora"}};
         for (auto& e : c) for (auto& r : roles) if (e.id == r[0]) e.role = r[1];
     }
 
