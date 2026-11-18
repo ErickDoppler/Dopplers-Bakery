@@ -34,7 +34,7 @@ Block layout (per block): `attn1` video self-attention, `attn2` text cross-atten
 |---|---|---|
 | 0 | Tab, form, model roles, queue entry, engine stub (done) | tab visible, job reports a clear message |
 | 1 | **Done.** `src/ltx/ltx_weights.*`: F32/BF16/FP8 (+scale)/NVFP4 (cuBLAS-tiled block scales) -> float32. `DopplersBakery ltx-weights <ckpt> <gemma>` vs `tools/ltx_ref.py` (ComfyUI code): 12 tensors, checksums identical | loader checksums equal ComfyUI |
-| 2 | Gemma 3 text encoder (NVFP4) + aggregate embeds + connectors | embeddings equal to ComfyUI output for the same prompt (dumped from ComfyUI once) |
+| 2 | **Done.** `src/ltx/ltx_text.*`: Gemma 3 12B layer by layer (35 s for a 25-token prompt), per-token RMS + dual projection, 8-block video/audio connectors with registers. `DopplersBakery ltx-text` vs `tools/ltx_ref_text.py`: tokens identical, projection cosine 0.99974, video context 0.99990, audio context 0.99998 (ComfyUI runs bf16, this F16) | matches ComfyUI to bf16 precision |
 | 3 | Video VAE decoder (and encoder for i2v), tiled | decode a ComfyUI latent to frames that match |
 | 4 | DiT forward (video + audio streams, cross-modal attention, rope, adaLN) with layer streaming from RAM (27 GB does not fit 12 GB VRAM) | one step output equals ComfyUI |
 | 5 | Sampler: stage 1, upscaler, stage 2, noise/sigmas, guiding frames | video without sound |

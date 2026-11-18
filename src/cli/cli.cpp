@@ -105,6 +105,7 @@ int runCodecTest(const std::vector<std::string>& a);
 int runSaDiTTest(const std::vector<std::string>& a);
 int runSaVaeTest(const std::vector<std::string>& a);
 int runLtxWeightsTest(const std::vector<std::string>& a);
+int runLtxTextTest(const std::vector<std::string>& a);
 
 // chat --say "message" [--say "next message" ...] [--voice] [--speaker Ryan]
 int runChatCli(const std::vector<std::string>& a) {
@@ -215,6 +216,7 @@ int runCli(const std::vector<std::string>& a) {
     if (a[0] == "selftest-codec") return runCodecTest(std::vector<std::string>(a.begin() + 1, a.end()));
     if (a[0] == "selftest-sa-dit") return runSaDiTTest(std::vector<std::string>(a.begin() + 1, a.end()));
     if (a[0] == "selftest-sa-vae") return runSaVaeTest(std::vector<std::string>(a.begin() + 1, a.end()));
+    if (a[0] == "ltx-text") return runLtxTextTest(std::vector<std::string>(a.begin() + 1, a.end()));
     if (a[0] == "ltx-weights") return runLtxWeightsTest(std::vector<std::string>(a.begin() + 1, a.end()));
     if (a[0] == "switch-test") return runSwitchTestCli();
     if (a[0] == "cuda-install") return runCudaInstallCli();
