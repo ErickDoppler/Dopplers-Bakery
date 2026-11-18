@@ -110,6 +110,7 @@ int runLtxVaeTest(const std::vector<std::string>& a);
 int runLtxDitTest(const std::vector<std::string>& a);
 int runLtxUpscalerTest(const std::vector<std::string>& a);
 int runLtxGenTest(const std::vector<std::string>& a);
+int runLtxAudioTest(const std::vector<std::string>& a);
 
 // chat --say "message" [--say "next message" ...] [--voice] [--speaker Ryan]
 int runChatCli(const std::vector<std::string>& a) {
@@ -220,6 +221,7 @@ int runCli(const std::vector<std::string>& a) {
     if (a[0] == "selftest-codec") return runCodecTest(std::vector<std::string>(a.begin() + 1, a.end()));
     if (a[0] == "selftest-sa-dit") return runSaDiTTest(std::vector<std::string>(a.begin() + 1, a.end()));
     if (a[0] == "selftest-sa-vae") return runSaVaeTest(std::vector<std::string>(a.begin() + 1, a.end()));
+    if (a[0] == "ltx-audio") return runLtxAudioTest(std::vector<std::string>(a.begin() + 1, a.end()));
     if (a[0] == "ltx-gen") return runLtxGenTest(std::vector<std::string>(a.begin() + 1, a.end()));
     if (a[0] == "ltx-up") return runLtxUpscalerTest(std::vector<std::string>(a.begin() + 1, a.end()));
     if (a[0] == "ltx-dit") return runLtxDitTest(std::vector<std::string>(a.begin() + 1, a.end()));

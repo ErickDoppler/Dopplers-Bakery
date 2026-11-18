@@ -1,4 +1,4 @@
-// LTX-2.3 image/text-to-video pipeline as in VIDEO_WORKFLOW.json:
+﻿// LTX-2.3 image/text-to-video pipeline as in VIDEO_WORKFLOW.json:
 //   text -> Gemma + connectors -> stage 1 (half resolution, 8 Euler steps, distilled LoRA) -> x2 spatial upscaler -> stage 2 (3 Euler steps) -> VAE decode
 // The first latent frame can be fixed to a start image (image-to-video); audio is sampled together with the video.
 #pragma once
@@ -18,6 +18,7 @@ struct LtxGenParams {
     int fps = 24;
     int seed = 42;
     bool upscale = true;                  // false: stop after stage 1 (half size)
+    bool decodeAudio = true;              // decode the sound track (48 kHz stereo)
     float loraStrength = 0.5f;
     int ditBlocks = 48;                   // fewer only for tests
     ImageRgb* startImage = nullptr;       // optional
@@ -28,9 +29,12 @@ struct LtxResult {
     Vol frames;                           // [T][3][H][W] in [-1, 1]
     std::vector<float> audioLatent;       // [8][Ta][16] (decoded to sound in stage 6)
     int audioFrames = 0;
+    std::vector<float> wave;              // [2][samples] at 48 kHz when decodeAudio
+    int waveSamples = 0;
 };
 
 // progress(0..1, text); return false from `cancel` to stop
 bool ltxGenerate(const LtxFiles& files, const LtxGenParams& p, LtxResult& out, const std::function<void(float, const std::string&)>& progress, std::string& err);
 
 int runLtxGenTest(const std::vector<std::string>& args);      // ltx-gen <out dir> "<prompt>" W H seconds fps seed [image] [blocks]
+

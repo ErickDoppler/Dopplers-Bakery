@@ -1,12 +1,14 @@
-#include "ltx/ltx_pipeline.h"
+﻿#include "ltx/ltx_pipeline.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <random>
+#include "ltx/ltx_audio.h"
 #include "ltx/ltx_text.h"
 #include "ltx/ltx_upscaler.h"
+#include "util/mp4.h"
 #include "util/png.h"
 #include "util/sys.h"
 
@@ -128,6 +130,11 @@ bool ltxGenerate(const LtxFiles& files, const LtxGenParams& p, LtxResult& out, c
     Vol lat; lat.T = F; lat.C = 128; lat.H = fh; lat.W = fw; lat.d = swapAB(vid, 128, F, (size_t)fh * fw);
     if (!vae.decode(lat, out.frames, [&](const std::string& s) { say(0.95f, "video decoder: " + s); }, err)) return false;
     out.audioLatent = aud; out.audioFrames = Ta;
+    if (p.decodeAudio) {
+        say(0.97f, "decoding the sound");
+        LtxAudio au; au.ckpt = &ck;
+        if (!au.decode(aud, Ta, out.wave, out.waveSamples, nullptr, err)) return false;
+    }
     say(1.0f, "done");
     return true;
 }
@@ -153,6 +160,18 @@ int runLtxGenTest(const std::vector<std::string>& a) {
             px[((size_t)y * r.frames.W + x) * 3 + c] = (uint8_t)std::clamp((r.frames.at(t, c, y, x) + 1.f) * 127.5f, 0.f, 255.f);
         writePngRgb8(a[0] + "\\frame_" + std::to_string(t) + ".png", px.data(), r.frames.W, r.frames.H);
     }
+    {   std::vector<std::vector<uint8_t>> store(r.frames.T); std::vector<const uint8_t*> ptrs;
+        for (int t = 0; t < r.frames.T; t++) { store[t].resize((size_t)r.frames.W * r.frames.H * 3);
+            for (int y = 0; y < r.frames.H; y++) for (int x = 0; x < r.frames.W; x++) for (int c = 0; c < 3; c++) store[t][((size_t)y * r.frames.W + x) * 3 + c] = (uint8_t)std::clamp((r.frames.at(t, c, y, x) + 1.f) * 127.5f, 0.f, 255.f);
+            ptrs.push_back(store[t].data()); }
+        std::vector<float> inter((size_t)r.waveSamples * 2); for (int i = 0; i < r.waveSamples; i++) { inter[(size_t)i * 2] = r.wave[i]; inter[(size_t)i * 2 + 1] = r.wave[(size_t)r.waveSamples + i]; }
+        if (!writeMp4(a[0] + "\\clip.mp4", ptrs, r.frames.W, r.frames.H, p.fps, inter, 2, LtxAudio::kSampleRate, err)) { fprintf(stderr, "mp4: %s\n", err.c_str()); return 1; }
+        std::vector<uint8_t> rgb; int w = 0, h = 0; double secs = 0; bool aud = false;
+        if (!readMp4Frame(a[0] + "\\clip.mp4", r.frames.T / 2, rgb, w, h, secs, aud, err)) { fprintf(stderr, "readback: %s\n", err.c_str()); return 1; }
+        writePngRgb8(a[0] + "\\readback.png", rgb.data(), w, h);
+        printf("clip.mp4: %dx%d, %.2f s, audio stream: %s\n", w, h, secs, aud ? "yes" : "no");
+    }
     printf("%d frames %dx%d, audio latent %d frames\n", r.frames.T, r.frames.W, r.frames.H, r.audioFrames);
     return 0;
 }
+
