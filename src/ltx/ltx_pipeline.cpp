@@ -199,3 +199,14 @@ int runLtxGenTest(const std::vector<std::string>& a) {
 
 
 
+
+// `DopplersBakery mp4-frame <file.mp4> <out.png> [frame]`: decodes one frame of an MP4 (checks what the app wrote)
+int runMp4FrameTest(const std::vector<std::string>& a) {
+    if (a.size() < 2) { fprintf(stderr, "usage: mp4-frame <file.mp4> <out.png> [frame]\n"); return 2; }
+    std::vector<uint8_t> rgb; int w = 0, h = 0; double secs = 0; bool aud = false; std::string err;
+    if (!readMp4Frame(a[0], a.size() > 2 ? atoi(a[2].c_str()) : 0, rgb, w, h, secs, aud, err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+    writePngRgb8(a[1], rgb.data(), w, h);
+    printf("%dx%d, %.2f s, audio stream: %s\n", w, h, secs, aud ? "yes" : "no");
+    return 0;
+}
+

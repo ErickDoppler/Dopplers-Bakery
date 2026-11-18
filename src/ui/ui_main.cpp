@@ -464,7 +464,13 @@ LRESULT CALLBACK formProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         case SB_PAGEUP: pos -= si.nPage; break; case SB_PAGEDOWN: pos += si.nPage; break;
         case SB_THUMBTRACK: case SB_THUMBPOSITION: pos = si.nTrackPos; break;
         }
-        p->scroll = pos; layoutForm(*p); return 0;
+        p->scroll = pos;
+        SendMessageW(h, WM_SETREDRAW, FALSE, 0);
+        layoutForm(*p);
+        SendMessageW(h, WM_SETREDRAW, TRUE, 0);
+        // the controls were moved one by one: repaint the whole form and its children, or the old pixels stay behind as ghosts
+        RedrawWindow(h, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        return 0;
     }
     case WM_HSCROLL:       // trackbars live in the form
         for (auto& c : p->fc) if (c.ctl == (HWND)lp && c.f->type == FT::Slider) { c.ext = 0; sliderLabel(c); }      // moving the trackbar ends an extended length
