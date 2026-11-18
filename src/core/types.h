@@ -1,4 +1,4 @@
-// Shared vocabulary: job kinds, model roles per operation tab.
+﻿// Shared vocabulary: job kinds, model roles per operation tab.
 #pragma once
 #include <string>
 #include <vector>
@@ -52,6 +52,8 @@ inline const std::vector<Role>& rolesOf(Kind k) {
         {"upscaler", "Spatial upscaler x2", "latent_upscale_models|upscale", ".safetensors", true},
         {"lora", "Distilled LoRA", "loras", ".safetensors", true},
         {"clip_lora", "Gemma LoRA (optional)", "loras", ".safetensors", false},
+        {"llm", "Prompt enhancer LLM, GGUF (optional; the LLM tab model is used if empty)", "LLM|gguf", ".gguf", false},
     };
     switch (k) { case Kind::LLM: return llm; case Kind::TTS: return tts; case Kind::Image: return img; case Kind::Video: return vid; default: return aud; }
 }
+

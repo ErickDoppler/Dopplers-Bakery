@@ -6,6 +6,7 @@
 #include <shellapi.h>
 #include <mmsystem.h>
 #include <algorithm>
+#include <map>
 #include <array>
 #include <cmath>
 #include "gpu/compute.h"
@@ -40,7 +41,7 @@ struct FieldCtl {
     int x = 0, ly = 0, cy = 0, w = 0, ch = 0;      // logical layout (before scrolling)
     int ext = 0;                                   // value above the trackbar range (Audio length set with Extend...), 0 = none
 };
-struct OutItem { int jobId; std::string path, text, when; };
+struct OutItem { int jobId; std::string path, text, when, name; unsigned long long mtime = 0, size = 0; };
 
 struct Page {
     Kind kind;
@@ -51,7 +52,12 @@ struct Page {
     int contentH = 0, scroll = 0;
     bool ready = true;
     std::vector<OutItem> outs;
-    std::string sig;
+    std::string sig, newest;             // newest = path of the latest result (the list can be sorted any way)
+    int outH = 120, splitY = 0;          // height of the results list (dragged with the strip above it) and where that strip starts
+    std::map<std::string, int> fx;       // extra height of each multi-line box (dragged with the strip under it)
+    std::string dragKey;
+    int sortCol = 0; bool sortAsc = false;
+    int dragMode = 0, dragY = 0, dragStart = 0;
     // audio tabs: a small player under the list (Prev / Play-Pause / Stop / Next, position bar, what is playing)
     HWND bPrev = nullptr, bPlay = nullptr, bStop = nullptr, bNext = nullptr, trk = nullptr, lblNow = nullptr;
     bool seeking = false;
@@ -197,6 +203,7 @@ void layoutForm(Page& p) {
             if (col == 1) { y += rowH; rowH = 0; col = 0; }
             c.x = M; c.w = usable - 2 * M; c.ly = y; c.cy = y + 18;
             c.ch = f.type == FT::Multi ? f.lines * 17 + 10 : (f.type == FT::Slider ? 26 : 24);
+            if (f.type == FT::Multi) c.ch = std::max(40, c.ch + p.fx[f.key]);              // the user can drag the strip under a text box to make it taller
             y += 18 + c.ch + 8;
             if (isMainPrompt(f)) { p.actY = y; y += 52; }          // Create + Settings row right under the main prompt
         }
@@ -228,16 +235,17 @@ void layoutPage(Page& p) {
     RECT rc; GetClientRect(p.hwnd, &rc);
     int W = rc.right, H = rc.bottom;
     const int playerH = pagePlays(p) ? 58 : 0;
-    int warnH = p.ready ? 0 : 36, actH = 0, outH = 120, outBtnH = 32;
+    int warnH = p.ready ? 0 : 36, actH = 0, outH = p.outH, outBtnH = 32;
     ShowWindow(p.warn, p.ready ? SW_HIDE : SW_SHOW);
     uiPlace(p.warn, 6, 4, W - 12, warnH);
     int top = warnH ? warnH + 6 : 0;
-    int formH = std::max(60, H - top - actH - outH - outBtnH - playerH - 6);
+    int formH = std::max(60, H - top - actH - outH - outBtnH - playerH - 12);
     uiPlace(p.form, 0, top, W, formH);
-    int y = top + formH + 4;
+    p.splitY = top + formH;                                           // a 10 px strip here can be dragged to change the height of the list
+    int y = top + formH + 10;
     y += actH;
     uiPlace(p.list, 8, y, W - 16, outH);
-    ListView_SetColumnWidth(p.list, 1, std::max(120, W - 16 - 130 - 22));
+    ListView_SetColumnWidth(p.list, 1, std::max(120, W - 16 - (80 + 130 + 80) - 22));
     y += outH + 4;
     int bw = pagePlays(p) ? 150 : 96;
     uiPlace(p.bPreview, 8, y, bw, 26);
@@ -251,6 +259,7 @@ void layoutPage(Page& p) {
         uiPlace(p.trk, 296, y, std::max(60, W - 296 - 8), 26);
     }
     layoutForm(p);
+    InvalidateRect(p.hwnd, nullptr, TRUE);                           // the splitter bar moved
 }
 
 void refreshReady(Page& p) {
@@ -263,6 +272,27 @@ void refreshReady(Page& p) {
 
 // ----------------------------------------------------------------- outputs list
 int outIndexOf(const Page& p, const std::string& path);
+// header texts with a sort arrow on the active column
+void applyOutColumns(Page& p) {
+    static const wchar_t* base[] = {L"Result of", L"Output (this session)", L"Date", L"Size"};
+    for (int k = 0; k < 4; k++) {
+        std::wstring t = base[k]; if (k == p.sortCol) t += p.sortAsc ? L"  \u25B2" : L"  \u25BC";
+        LVCOLUMNW c = {}; c.mask = LVCF_TEXT; c.pszText = &t[0]; ListView_SetColumn(p.list, k, &c);
+    }
+}
+std::string fileDateText(unsigned long long ft) {
+    if (!ft) return "";
+    FILETIME f = {(DWORD)(ft & 0xffffffffu), (DWORD)(ft >> 32)}, loc; SYSTEMTIME st;
+    if (!FileTimeToLocalFileTime(&f, &loc) || !FileTimeToSystemTime(&loc, &st)) return "";
+    char b[32]; snprintf(b, sizeof b, "%04d-%02d-%02d %02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute); return b;
+}
+void sortOuts(const Page& p, std::vector<OutItem>& v) {
+    auto lower = [](std::string s) { for (auto& c : s) c = (char)tolower((unsigned char)c); return s; };
+    auto less = [&](const OutItem& a, const OutItem& b) {
+        switch (p.sortCol) { case 1: return lower(a.name) < lower(b.name); case 2: return a.mtime < b.mtime; case 3: return a.size < b.size; default: return a.jobId < b.jobId; }
+    };
+    std::stable_sort(v.begin(), v.end(), [&](const OutItem& a, const OutItem& b) { return p.sortAsc ? less(a, b) : less(b, a); });
+}
 void refreshOutputs(Page& p) {
     auto jobs = JobQueue::get().snapshot();
     std::vector<OutItem> items;
@@ -276,25 +306,38 @@ void refreshOutputs(Page& p) {
             items.push_back(oi); sig += std::to_string(it->id) + o + "|";
         }
     }
+    sig += "#" + std::to_string(p.sortCol) + (p.sortAsc ? "a" : "d");
     if (sig == p.sig) return;
-    // what was selected (by file, the list is newest first so row numbers shift) and which file was the newest before
+    // what was selected (by file: the order changes) and which file was the newest before
     int selRow = ListView_GetNextItem(p.list, -1, LVNI_SELECTED);
     const std::string selPath = selRow >= 0 && selRow < (int)p.outs.size() ? p.outs[selRow].path : std::string();
-    const std::string oldNewest = p.outs.empty() ? std::string() : p.outs[0].path;
-    p.sig = sig; p.outs = items;
+    const std::string oldNewest = p.newest;
+    const std::string newest = items.empty() ? std::string() : items[0].path;           // the jobs were walked newest first
+    for (auto& oi : items) {
+        oi.name = oi.text.empty() ? oi.path.substr(oi.path.find_last_of("\\/") + 1) : oi.text;
+        for (auto& c : oi.name) if (c == '\r' || c == '\n') c = ' ';
+        if (oi.name.size() > 160) oi.name.resize(160);
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        if (!oi.path.empty() && GetFileAttributesExW(sys::widen(oi.path).c_str(), GetFileExInfoStandard, &fa)) {
+            oi.mtime = ((unsigned long long)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
+            oi.size = ((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+        } else oi.size = oi.text.size();
+    }
+    sortOuts(p, items);
+    p.sig = sig; p.outs = items; p.newest = newest;
+    applyOutColumns(p);
     ListView_DeleteAllItems(p.list);
     for (size_t i = 0; i < items.size(); i++) {
         LVITEMW it = {}; it.mask = LVIF_TEXT; it.iItem = (int)i;
         std::wstring w = sys::widen(items[i].when); it.pszText = &w[0];
         ListView_InsertItem(p.list, &it);
-        std::string d = items[i].text.empty() ? items[i].path.substr(items[i].path.find_last_of("\\/") + 1) : items[i].text;
-        for (auto& c : d) if (c == '\r' || c == '\n') c = ' ';
-        if (d.size() > 160) d.resize(160);
-        std::wstring wd = sys::widen(d); ListView_SetItemText(p.list, (int)i, 1, &wd[0]);
+        std::wstring wd = sys::widen(items[i].name); ListView_SetItemText(p.list, (int)i, 1, &wd[0]);
+        std::wstring wt = sys::widen(fileDateText(items[i].mtime)); ListView_SetItemText(p.list, (int)i, 2, &wt[0]);
+        std::wstring ws = sys::widen(sys::humanSize(items[i].size)); ListView_SetItemText(p.list, (int)i, 3, &ws[0]);
     }
     // a freshly generated result becomes the selected one (so Play / Preview / Copy / Delete act on it); otherwise the selection stays on its file
     int want = -1;
-    if (!items.empty() && items[0].path != oldNewest) want = 0;
+    if (!newest.empty() && newest != oldNewest) want = outIndexOf(p, newest);
     else if (!selPath.empty()) want = outIndexOf(p, selPath);
     if (want >= 0) { ListView_SetItemState(p.list, want, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED); ListView_EnsureVisible(p.list, want, FALSE); }
 }
@@ -391,6 +434,19 @@ void onCreateClicked(Page& p) {
 }
 
 // ----------------------------------------------------------------- page window procs
+// a visible bar with grip dots: the edge between two sections that can be dragged
+void drawSplitter(HDC dc, int x, int y, int w, int h) {
+    RECT r = {x, y, x + w, y + h};
+    HBRUSH b = CreateSolidBrush(RGB(205, 210, 219)); FillRect(dc, &r, b); DeleteObject(b);
+    HPEN dark = CreatePen(PS_SOLID, 1, GetSysColor(COLOR_3DSHADOW)), light = CreatePen(PS_SOLID, 1, GetSysColor(COLOR_3DHILIGHT)), old = (HPEN)SelectObject(dc, dark);
+    MoveToEx(dc, x, y, nullptr); LineTo(dc, x + w, y);
+    SelectObject(dc, light); MoveToEx(dc, x, y + h - 1, nullptr); LineTo(dc, x + w, y + h - 1);
+    SelectObject(dc, old); DeleteObject(dark); DeleteObject(light);
+    HBRUSH dot = CreateSolidBrush(RGB(110, 118, 130));
+    for (int k = -3; k <= 3; k++) { RECT d = {x + w / 2 + k * 8 - 1, y + h / 2 - 1, x + w / 2 + k * 8 + 2, y + h / 2 + 2}; FillRect(dc, &d, dot); }
+    DeleteObject(dot);
+}
+
 LRESULT CALLBACK pageProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     if (m == WM_NCCREATE) SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)((CREATESTRUCTW*)lp)->lpCreateParams);
     Page* p = (Page*)GetWindowLongPtrW(h, GWLP_USERDATA);
@@ -444,7 +500,44 @@ LRESULT CALLBACK pageProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         break;
     case WM_NOTIFY:
         if (((NMHDR*)lp)->idFrom == IDC_OUTLIST && ((NMHDR*)lp)->code == NM_DBLCLK) { onOutputAction(*p, IDC_PREVIEW); return 0; }
+        if (((NMHDR*)lp)->idFrom == IDC_OUTLIST && ((NMHDR*)lp)->code == LVN_COLUMNCLICK) {      // click a header: sort by it, click again to reverse
+            const int col = ((NMLISTVIEW*)lp)->iSubItem;
+            if (col == p->sortCol) p->sortAsc = !p->sortAsc; else { p->sortCol = col; p->sortAsc = col == 1; }      // names A-Z first, dates / sizes / jobs newest or largest first
+            const std::string k = kindKey(p->kind);
+            Settings::get().setUiInt("outsort_" + k, p->sortCol); Settings::get().setUiInt("outasc_" + k, p->sortAsc ? 1 : 0);
+            p->sig.clear(); refreshOutputs(*p);
+            return 0;
+        }
         break;
+    case WM_SETCURSOR: {                                                // the strip above the results list is a splitter
+        POINT pt; GetCursorPos(&pt); ScreenToClient(h, &pt);
+        if (pt.y >= p->splitY && pt.y < p->splitY + 10 && pt.y > 0) { SetCursor(LoadCursorW(nullptr, IDC_SIZENS)); return TRUE; }
+        break;
+    }
+    case WM_LBUTTONDOWN: {
+        const int y = (short)HIWORD(lp);
+        if (y >= p->splitY && y < p->splitY + 10) { p->dragMode = 1; p->dragY = y; p->dragStart = p->outH; SetCapture(h); return 0; }
+        break;
+    }
+    case WM_MOUSEMOVE:
+        if (p->dragMode == 1 && (wp & MK_LBUTTON)) {
+            RECT rc; GetClientRect(h, &rc);
+            p->outH = std::min(std::max(60, p->dragStart + (p->dragY - (short)HIWORD(lp))), std::max(60, (int)rc.bottom - 200));
+            layoutPage(*p);
+            return 0;
+        }
+        break;
+    case WM_LBUTTONUP:
+        if (p->dragMode == 1) { p->dragMode = 0; ReleaseCapture(); Settings::get().setUiInt("outh_" + std::string(kindKey(p->kind)), p->outH); return 0; }
+        break;
+    case WM_CAPTURECHANGED: p->dragMode = 0; break;
+    case WM_PAINT: {                                                    // the bar between the form and the results list
+        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        RECT rc; GetClientRect(h, &rc);
+        drawSplitter(dc, 8, p->splitY, rc.right - 16, 10);
+        EndPaint(h, &ps);
+        return 0;
+    }
     case WM_CTLCOLORSTATIC:
         if ((HWND)lp == p->warn) { SetTextColor((HDC)wp, RGB(185, 30, 30)); SetBkMode((HDC)wp, TRANSPARENT); return (LRESULT)GetSysColorBrush(COLOR_BTNFACE); }
         break;
@@ -475,6 +568,31 @@ LRESULT CALLBACK formProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_HSCROLL:       // trackbars live in the form
         for (auto& c : p->fc) if (c.ctl == (HWND)lp && c.f->type == FT::Slider) { c.ext = 0; sliderLabel(c); }      // moving the trackbar ends an extended length
         return 0;
+    case WM_SETCURSOR: case WM_LBUTTONDOWN: case WM_MOUSEMOVE: case WM_LBUTTONUP: case WM_PAINT: case WM_CAPTURECHANGED: {
+        // the 8 px strip under every multi-line box is a grip: drag it to make that box taller or shorter
+        auto gripTop = [&](const FieldCtl& c) { return c.cy + c.ch - p->scroll; };
+        POINT pt = {0, 0}; if (m == WM_SETCURSOR) { GetCursorPos(&pt); ScreenToClient(h, &pt); } else if (m != WM_PAINT && m != WM_CAPTURECHANGED) { pt.y = (short)HIWORD(lp); }
+        const FieldCtl* hit = nullptr;
+        for (auto& c : p->fc) if (c.f->type == FT::Multi && pt.y >= gripTop(c) && pt.y < gripTop(c) + 8) hit = &c;
+        if (m == WM_SETCURSOR && hit) { SetCursor(LoadCursorW(nullptr, IDC_SIZENS)); return TRUE; }
+        if (m == WM_LBUTTONDOWN && hit) { p->dragMode = 2; p->dragKey = hit->f->key; p->dragY = pt.y; p->dragStart = p->fx[hit->f->key]; SetCapture(h); return 0; }
+        if (m == WM_MOUSEMOVE && p->dragMode == 2 && (wp & MK_LBUTTON)) {
+            p->fx[p->dragKey] = std::min(1500, std::max(-80, p->dragStart + (int)(pt.y - p->dragY)));
+            SendMessageW(h, WM_SETREDRAW, FALSE, 0); layoutForm(*p); SendMessageW(h, WM_SETREDRAW, TRUE, 0);
+            RedrawWindow(h, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            return 0;
+        }
+        if (m == WM_LBUTTONUP && p->dragMode == 2) { p->dragMode = 0; ReleaseCapture(); Settings::get().setUiInt("fx_" + std::string(kindKey(p->kind)) + "_" + p->dragKey, p->fx[p->dragKey]); return 0; }
+        if (m == WM_CAPTURECHANGED) p->dragMode = 0;
+        if (m == WM_PAINT) {
+            PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+            RECT rc; GetClientRect(h, &rc);
+            for (auto& c : p->fc) if (c.f->type == FT::Multi) drawSplitter(dc, c.x, gripTop(c), c.w, 8);
+            EndPaint(h, &ps);
+            return 0;
+        }
+        break;
+    }
     case WM_DRAWITEM:
         if (wp == IDC_CREATE) { drawCreateButton((DRAWITEMSTRUCT*)lp); return TRUE; }
         break;
@@ -527,8 +645,15 @@ void buildPage(Page& p, Kind kind) {
     SendMessageW(p.bSettings, WM_SETFONT, (WPARAM)btnFont(false), TRUE);
     p.list = uiMake(p.hwnd, WC_LISTVIEWW, "", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_TABSTOP, IDC_OUTLIST, WS_EX_CLIENTEDGE);
     ListView_SetExtendedListViewStyle(p.list, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
-    const wchar_t* cols[] = {L"Result of", L"Output (this session)"}; int cw[] = {90, 300};
-    for (int k = 0; k < 2; k++) { LVCOLUMNW c = {}; c.mask = LVCF_TEXT | LVCF_WIDTH; c.pszText = (LPWSTR)cols[k]; c.cx = cw[k]; ListView_InsertColumn(p.list, k, &c); }
+    const wchar_t* cols[] = {L"Result of", L"Output (this session)", L"Date", L"Size"}; int cw[] = {80, 280, 130, 80};
+    for (int k = 0; k < 4; k++) { LVCOLUMNW c = {}; c.mask = LVCF_TEXT | LVCF_WIDTH; c.pszText = (LPWSTR)cols[k]; c.cx = cw[k]; ListView_InsertColumn(p.list, k, &c); }
+    {   // what the user set last time: height of the results list and of the prompt box, how the list is sorted
+        Settings& s = Settings::get(); const std::string k = kindKey(kind);
+        p.outH = std::min(900, std::max(60, s.uiInt("outh_" + k, 120)));
+        for (auto& f : fieldsOf(kind)) if (f.type == FT::Multi) p.fx[f.key] = std::min(1500, std::max(-80, s.uiInt("fx_" + k + "_" + f.key, isMainPrompt(f) ? s.uiInt("prompt_extra_" + k, 0) : 0)));
+        p.sortCol = std::min(3, std::max(0, s.uiInt("outsort_" + k, 0))); p.sortAsc = s.uiInt("outasc_" + k, 0) != 0;
+        applyOutColumns(p);
+    }
     bool audio = isAudio(kind);
     const bool music = kind == Kind::Audio;           // the Audio (music) tab also has keyboard shortcuts: F2 / F3 / Shift+Delete
     p.bPreview = uiMake(p.hwnd, L"BUTTON", music ? "Play / Stop latest (F3)" : audio ? "Play / Stop" : "Preview", BS_PUSHBUTTON | WS_TABSTOP, IDC_PREVIEW);
@@ -1057,6 +1182,10 @@ LRESULT CALLBACK mainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 // Keyboard shortcuts of the Audio (music) tab: F2 generate, F3 play/stop the latest generated file, Shift+Delete delete the selected file
 bool routeKey(MSG& msg) {
     if (msg.message != WM_KEYDOWN) return false;
+    if (msg.wParam == 'A' && (GetKeyState(VK_CONTROL) & 0x8000)) {         // Ctrl+A in a multi-line text box (Windows does not do this by itself)
+        wchar_t cls[16] = {}; GetClassNameW(msg.hwnd, cls, 16);
+        if (!wcscmp(cls, L"Edit") && (GetWindowLongW(msg.hwnd, GWL_STYLE) & ES_MULTILINE)) { SendMessageW(msg.hwnd, EM_SETSEL, 0, -1); return true; }
+    }
     if (msg.wParam != VK_F2 && msg.wParam != VK_F3 && msg.wParam != VK_DELETE) return false;
     if (TabCtrl_GetCurSel(g_tab) != 1 + (int)Kind::Audio) return false;
     if (msg.hwnd != g_main && !IsChild(g_main, msg.hwnd)) return false;
@@ -1065,9 +1194,9 @@ bool routeKey(MSG& msg) {
     if (msg.wParam == VK_F3) {
         if (p.outs.empty()) return true;
         Player& pl = Player::get();
-        const std::string latest = p.outs[0].path;                       // the list is newest first
+        const std::string latest = p.newest.empty() ? p.outs[0].path : p.newest;           // the list can be sorted any way: the newest is tracked separately
         if (pl.current() == latest && pl.playing()) pl.stop();
-        else { selectOut(p, 0); pl.play(latest); }
+        else { int at = outIndexOf(p, latest); selectOut(p, at < 0 ? 0 : at); pl.play(latest); }
         updatePlayer(p);
         return true;
     }
@@ -1125,4 +1254,5 @@ int runGui(HINSTANCE inst) {
     JobQueue::get().shutdown();
     return 0;
 }
+
 

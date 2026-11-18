@@ -64,7 +64,8 @@ const std::vector<Field>& fieldsOf(Kind k) {
         {"mp3_quality", "MP3 quality (V0 = 256 kbps)", FT::Combo, 0, 0, 0, "V0", "V0|128k|320k", 0},
     };
     // defaults follow VIDEO_WORKFLOW.json: 768x512, 24 fps, two stages with the x2 spatial upscaler
-    static const std::vector<Field> vid = {
+    static const std::vector<Field> vid = [] {
+        std::vector<Field> v = {
         {"prompt", "Prompt (what happens: actions, camera, light, sound)", FT::Multi, 0, 0, 0, "", "", 6},
         {"negative", "Negative prompt", FT::Multi, 0, 0, 0, "pc game, console game, video game, cartoon, childish, ugly", "", 2},
         {"init_image", "Start image for image-to-video (optional; empty = text to video)", FT::File, 0, 0, 0, "", "", 0},
@@ -73,9 +74,15 @@ const std::vector<Field>& fieldsOf(Kind k) {
         {"seconds", "Length (seconds)", FT::Slider, 4, 1, 20, "", "", 0},
         {"fps", "Frames per second", FT::Int, 24, 8, 50, "", "", 0},
         {"seed", "Seed (-1 = random)", FT::Int, -1, -1, 2147483647, "", "", 0},
+        {"enhance", "Expand the prompt with the chat model first (adds scene, camera, lighting, effects and sound; needs a GGUF model, see Model settings)", FT::Check, 1, 0, 1, "", "", 0},
         {"upscale", "Second stage: x2 spatial upscaler", FT::Check, 1, 0, 1, "", "", 0},
         {"audio", "Generate the sound track", FT::Check, 1, 0, 1, "", "", 0},
-    };
+        };
+        // which GPU backend runs the model: CUDA (NVIDIA, needs the CUDA libraries) is often faster than Vulkan
+        static const std::string items = Compute::hasCuda() ? "Auto|Vulkan|CUDA|CPU" : "Auto|Vulkan|CPU";
+        v.push_back({"backend", "Backend (Auto = CUDA when its libraries are installed, otherwise Vulkan; CPU is very slow)", FT::Combo, 0, 0, 0, "Auto", items.c_str(), 0});
+        return v;
+    }();
     switch (k) { case Kind::LLM: return llm; case Kind::TTS: return tts; case Kind::Image: return img; case Kind::Video: return vid; default: return aud; }
 }
 
@@ -104,4 +111,7 @@ Json makeJobParams(Kind k, const Json& form) {
     for (auto& r : rolesOf(k)) p[r.key] = Settings::get().resolvedSelection(k, r.key);
     return p;
 }
+
+
+
 
