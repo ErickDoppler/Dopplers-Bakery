@@ -65,13 +65,15 @@ bool runVideo(const Job& job, JobCtl& ctl, std::string& err) {
     if (a == std::string::npos) { err = "Prompt is empty."; return false; }
     prompt = prompt.substr(a, prompt.find_last_not_of(" \r\n\t") - a + 1);
 
+    std::string expandNote;                                                   // what happened to the "expand the prompt" option, shown when the job is done
     if (p.boolean("enhance", true)) {
         ctl.progress(0.01f, "expanding the prompt");
         std::string expanded, note;
         const int r = expandVideoPrompt(p, job, prompt, std::min(std::max(p.num("seconds", 4), 1.0), 20.0), ctl, expanded, note);
         if (r == 2) { err = "cancelled"; return false; }
-        if (r == 0) prompt = expanded; else ctl.progress(0.01f, note);
-    }
+        if (r == 0) { prompt = expanded; expandNote = " (prompt expanded)"; }
+        else { ctl.progress(0.01f, note); expandNote = " (" + note + ")"; logLine("video: " + note); }
+    } else expandNote = " (prompt not expanded: the option is off)";
     ctl.setText(prompt);                                                      // the prompt that actually conditioned the video (shown in the job details)
 
     LtxGenParams gp; gp.prompt = prompt;
@@ -122,8 +124,26 @@ bool runVideo(const Job& job, JobCtl& ctl, std::string& err) {
     ctl.addOutput(file);
     char done[200];
     snprintf(done, sizeof done, "%dx%d, %d frames in %.0f s on %s, seed %lld", r.frames.W, r.frames.H, r.frames.T, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), Compute::get().description().c_str(), seed);
-    ctl.progress(1.0f, done);
+    ctl.progress(1.0f, std::string(done) + expandNote);
     return true;
+}
+
+// `DopplersBakery video-expand <model.gguf> "<prompt>"`: what the "expand the prompt" option produces (a check without the video model)
+int runVideoExpandTest(const std::vector<std::string>& a) {
+    if (a.size() < 2) { fprintf(stderr, "usage: video-expand <model.gguf> \"<prompt>\"\n"); return 2; }
+    struct Quiet : JobCtl {
+        std::string text;
+        void progress(float, const std::string&) override {}
+        void addOutput(const std::string&) override {}
+        void setText(const std::string& t) override { text = t; }
+        bool checkpoint() override { return true; }
+    } ctl;
+    Json p = Json::object(); p["llm"] = a[0]; p["seed"] = 1;
+    Job job; job.id = 0;
+    std::string out, note;
+    const int r = expandVideoPrompt(p, job, a[1], 4.0, ctl, out, note);
+    printf("%s\n", r == 0 ? out.c_str() : ("NOT EXPANDED: " + note).c_str());
+    return r == 0 ? 0 : 1;
 }
 
 

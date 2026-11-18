@@ -859,7 +859,7 @@ std::string jobDetails(const Job& j) {
     } else if (!prompt.empty()) s += "\nPrompt:\n" + prompt + "\n";
     if (!j.params.str("negative").empty()) s += "\nNegative prompt:\n" + j.params.str("negative") + "\n";
     if (!j.text.empty() && j.kind == Kind::LLM) s += "\nResult:\n" + j.text + "\n";
-    else if (!j.text.empty() && j.kind == Kind::Audio) s += "\nExpanded prompt used:\n" + j.text + "\n";
+    else if (!j.text.empty() && (j.kind == Kind::Audio || (j.kind == Kind::Video && j.text != prompt))) s += "\nExpanded prompt used:\n" + j.text + "\n";
     if (!j.outputs.empty()) { s += "\nFiles:\n"; for (auto& o : j.outputs) s += o + "\n"; }
     std::string st;
     for (auto& kv : j.params.o) {
