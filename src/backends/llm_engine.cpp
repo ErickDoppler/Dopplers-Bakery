@@ -4,6 +4,7 @@
 #include <random>
 #include <thread>
 #include "backends/engines.h"
+#include "ggml-backend.h"
 #include "llama.h"
 #include "util/crashlog.h"
 #include "util/sys.h"
@@ -26,6 +27,11 @@ bool ensureModel(const std::string& path, const std::string& lora, JobCtl& ctl, 
     ctl.progress(0, "loading model");
     llama_model_params mp = llama_model_default_params();
     mp.n_gpu_layers = 999;      // GPU backend DLL if present, otherwise falls back to CPU
+    static ggml_backend_dev_t onlyDev[2] = {nullptr, nullptr};                              // test hook: BAKERY_LLM_DEVICE=cuda|vulkan runs the model on that one backend
+    if (const char* e = getenv("BAKERY_LLM_DEVICE")) {
+        std::string want = e; for (auto& ch : want) ch = (char)tolower((unsigned char)ch);
+        for (size_t i = 0; i < ggml_backend_dev_count(); i++) { ggml_backend_dev_t d = ggml_backend_dev_get(i); std::string nm = ggml_backend_dev_name(d); for (auto& ch : nm) ch = (char)tolower((unsigned char)ch); if (nm.rfind(want, 0) == 0) { onlyDev[0] = d; mp.devices = onlyDev; break; } }
+    }
     g_cache.model = llama_model_load_from_file(path.c_str(), mp);
     if (!g_cache.model) { err = "cannot load model: " + path; return false; }
     g_cache.path = path;
@@ -99,6 +105,9 @@ bool runLLM(const Job& job, JobCtl& ctl, std::string& err) {
     // ---- context
     llama_context_params cp = llama_context_default_params();
     cp.n_ctx = nCtx; cp.n_batch = 512; cp.n_threads = threads; cp.n_threads_batch = threads;
+    if (const char* e = getenv("BAKERY_LLM_THREADS")) { cp.n_threads = atoi(e); }                    // test hooks
+    if (const char* e = getenv("BAKERY_LLM_FA")) cp.flash_attn_type = atoi(e) ? LLAMA_FLASH_ATTN_TYPE_ENABLED : LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    if (const char* e = getenv("BAKERY_LLM_UBATCH")) cp.n_ubatch = (uint32_t)atoi(e);
     llama_context* ctx = llama_init_from_model(model, cp);
     if (!ctx) { err = "cannot create context (out of memory? try a smaller Context)"; return false; }
     struct Free { llama_context* c; llama_sampler* s = nullptr; ~Free() { if (s) llama_sampler_free(s); llama_free(c); } } guard{ctx};
@@ -122,6 +131,7 @@ bool runLLM(const Job& job, JobCtl& ctl, std::string& err) {
         llama_sampler_chain_add(smpl, llama_sampler_init_dist((uint32_t)seed));
     }
 
+    const auto tPrompt = std::chrono::steady_clock::now();
     // ---- prompt ingestion
     ctl.progress(0, "reading prompt (" + std::to_string(nt) + " tokens)");
     for (int i = 0; i < nt; i += cp.n_batch) {
@@ -130,6 +140,7 @@ bool runLLM(const Job& job, JobCtl& ctl, std::string& err) {
         if (llama_decode(ctx, llama_batch_get_one(toks.data() + i, n)) != 0) { err = "decode failed while reading the prompt"; return false; }
     }
 
+    const double promptSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - tPrompt).count();
     // ---- generation
     std::string out;
     int gen = 0;
@@ -147,6 +158,7 @@ bool runLLM(const Job& job, JobCtl& ctl, std::string& err) {
         if (llama_decode(ctx, llama_batch_get_one(&tok, 1)) != 0) { err = "decode failed during generation"; return false; }
     }
     rate();
+    { const double gs = std::chrono::duration<double>(std::chrono::steady_clock::now() - tGen).count(); char b[200]; snprintf(b, sizeof b, "llm: prompt %d tokens in %.2f s (%.0f tok/s), %d tokens generated in %.2f s (%.1f tok/s), %d threads", nt, promptSec, nt / std::max(promptSec, 1e-3), gen, gs, gen / std::max(gs, 1e-3), cp.n_threads); logLine(b); }
     out = stripThink(out);
     while (!out.empty() && (out.back() == '\n' || out.back() == ' ')) out.pop_back();
     size_t lead = out.find_first_not_of("\n ");
