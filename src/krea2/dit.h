@@ -17,6 +17,7 @@ public:
     int quantBits = 8;                  // 8 (default) or 4 (low-memory mode); set before load()
     int mlpChunk = 0;                   // > 0: run the MLP of the image blocks in chunks of this many tokens (small GPU memory)
     bool loaded() const { return backend_ != nullptr; }
+    // (Off unless BAKERY_DIT_RESIDENT is set: when VRAM runs short Windows silently pages it out and steps get many times slower.)
     // The weights stay in host memory and the GPU reads them over PCIe on every step (about 0.7 s per step for the 13 GB of 8-bit weights). For the length of one job
     // the first blocks' matrices can be copied into GPU memory (at most maxBytes); forward() falls back to the host copies by itself if the graph then does not fit.
     int makeResident(size_t maxBytes);  // returns how many blocks are on the GPU

@@ -59,6 +59,8 @@ LtxModels g_models;                       // stays open between jobs: the merged
 int roundTo64(double v, int lo, int hi) { return std::min(hi, std::max(lo, (int)std::lround(v / 64.0) * 64)); }
 }
 
+void releaseVideoModels() { g_models.release(); }
+
 bool runVideo(const Job& job, JobCtl& ctl, std::string& err) {
     const Json& p = job.params;
     LtxFiles f; f.checkpoint = p.str("model"); f.gemma = p.str("clip"); f.upscaler = p.str("upscaler"); f.lora = p.str("lora");
@@ -105,6 +107,7 @@ bool runVideo(const Job& job, JobCtl& ctl, std::string& err) {
     const auto t0 = std::chrono::steady_clock::now();
     ctl.progress(0.0f, "opening the model files");
     std::string cerr;
+    if (freeRamMB() < 50000) releaseImageModels();                              // the image models (about 20 GB) go when RAM is short: paging would make both jobs crawl
     if (!g_models.open(f, gp.loraStrength, err)) return false;
     // Auto = CUDA when its libraries are installed (measured about 30 % faster than Vulkan on an RTX 3080 Ti), otherwise Vulkan
     std::string want = p.str("backend", "auto");

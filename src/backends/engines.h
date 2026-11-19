@@ -10,6 +10,9 @@ bool runAudio(const Job& job, JobCtl& ctl, std::string& err);   // pending_engin
 
 bool expandVideoPromptForTest(const std::string& ggufModel, const std::string& prompt, std::string& out);   // video_engine.cpp: the chat-model prompt expansion alone
 bool runVideo(const Job& job, JobCtl& ctl, std::string& err);   // video_engine.cpp (LTX-2.3 port, in progress)
+void releaseVideoModels();      // video_engine.cpp: free the LTX weights (tens of GB of RAM)
+void releaseImageModels();      // image_engine.cpp: free the image weights (about 20 GB of RAM)
+size_t freeRamMB();             // free physical memory
 
 // "Improve" button: the chat-model request (an internal LLM job) that rewrites the prompt of a tab; false + err when it cannot be made
 bool buildImproveJob(Kind k, const Json& form, Json& llmParams, std::string& err);          // backends/improve.cpp

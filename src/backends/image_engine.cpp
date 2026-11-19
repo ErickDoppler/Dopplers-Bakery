@@ -39,7 +39,11 @@ std::string trim(const std::string& s) { size_t a = s.find_first_not_of(" \r\n\t
 // models are tied to the backend: drop them when the backend is switched
 static const bool g_hookImage = (Compute::get().addResetHook([] { g.te.unload(); g.dit.unload(); g.vae.unload(); g.venc.unload(); g.tePath.clear(); g.ditKey.clear(); g.vaePath.clear(); g.vencPath.clear(); }), true);
 
+void releaseImageModels() { g.te.unload(); g.dit.unload(); g.vae.unload(); g.venc.unload(); g.tePath.clear(); g.ditKey.clear(); g.vaePath.clear(); g.vencPath.clear(); }
+size_t freeRamMB() { MEMORYSTATUSEX ms = {sizeof ms}; GlobalMemoryStatusEx(&ms); return (size_t)(ms.ullAvailPhys >> 20); }
+
 bool runImage(const Job& job, JobCtl& ctl, std::string& err) {
+    if (!g.dit.loaded() && freeRamMB() < 26000) { releaseVideoModels(); logLine("image: free RAM was low, the video models were released"); }          // both sets together do not fit: the machine would page for minutes
     const Json& p = job.params;
     std::string ditPath = p.str("model"), tePath = p.str("clip"), vaePath = p.str("vae"), loraPath = p.str("lora");
     if (ditPath.empty() || tePath.empty() || vaePath.empty()) { err = "Select the diffusion model, text encoder and VAE in [Settings]."; return false; }

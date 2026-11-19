@@ -23,7 +23,7 @@ void Krea2DiT::releaseResident() {
 int Krea2DiT::makeResident(size_t maxBytes) {
     releaseResident();
     Compute& cm = Compute::get();
-    if (!loaded() || blocks_.empty() || !cm.usingGpu() || cm.gpuIntegrated || getenv("BAKERY_DIT_NORESIDENT")) return 0;
+    if (!loaded() || blocks_.empty() || !cm.usingGpu() || cm.gpuIntegrated || !getenv("BAKERY_DIT_RESIDENT")) return 0;
     auto mats = [](Blk& b) { return std::array<ggml_tensor**, 8>{&b.wq, &b.wk, &b.wv, &b.gate, &b.wo, &b.mg, &b.mu, &b.md}; };
     Blk probe = blocks_[0]; size_t per = 0;
     for (ggml_tensor** t : mats(probe)) per += ggml_nbytes(*t);
