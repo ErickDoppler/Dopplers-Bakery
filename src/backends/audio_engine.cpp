@@ -82,6 +82,8 @@ std::vector<float> simpleSigmas(int steps) {
 }
 }  // namespace
 
+std::string audioImproveSystemPrompt(const std::string& mode) { return systemPrompt(mode); }       // the Improve button uses the same per-mode instructions
+
 static const bool g_hookAudio = (Compute::get().addResetHook([] { g.te.unload(); g.dit.unload(); g.vae.unload(); g.tePath.clear(); g.ckptPath.clear(); }), true);
 
 bool runAudio(const Job& job, JobCtl& ctl, std::string& err) {

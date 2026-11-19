@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <vector>
 #include "backends/engines.h"
+#include "core/forms.h"
 #include "core/settings.h"
 #include "gpu/compute.h"
 #include "ltx/ltx_audio.h"
@@ -71,7 +72,7 @@ bool runVideo(const Job& job, JobCtl& ctl, std::string& err) {
     if (p.boolean("enhance", true)) {
         ctl.progress(0.01f, "expanding the prompt");
         std::string expanded, note;
-        const int r = expandVideoPrompt(p, job, prompt, std::min(std::max(p.num("seconds", 4), 1.0), 20.0), ctl, expanded, note);
+        const int r = expandVideoPrompt(p, job, prompt, std::min(std::max(p.num("seconds", 4), 1.0), (double)kVideoModelMax), ctl, expanded, note);
         if (r == 2) { err = "cancelled"; return false; }
         if (r == 0) { prompt = expanded; expandNote = " (prompt expanded)"; }
         else { ctl.progress(0.01f, note); expandNote = " (" + note + ")"; logLine("video: " + note); }
@@ -81,12 +82,23 @@ bool runVideo(const Job& job, JobCtl& ctl, std::string& err) {
     LtxGenParams gp; gp.prompt = prompt;
     gp.width = roundTo64(p.num("width", 768), 128, 1920); gp.height = roundTo64(p.num("height", 512), 128, 1920);
     gp.fps = std::min(std::max(p.integer("fps", 24), 8), 50);
-    gp.seconds = (float)std::min(std::max(p.num("seconds", 4), 1.0), 20.0);
+    gp.seconds = (float)std::min(std::max(p.num("seconds", 4), 1.0), (double)kVideoModelMax);
     long long seed = (long long)p.num("seed", -1);
     if (seed < 0) seed = (long long)(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
     gp.seed = (int)seed; gp.upscale = p.boolean("upscale", true); gp.decodeAudio = p.boolean("audio", true);
     ImageRgb img; std::string imgPath = p.str("init_image");
     if (!imgPath.empty()) { if (!loadImage(imgPath, img, err)) return false; gp.startImage = &img; }
+    // Extend: the finished clip is read back; its last frame starts the new part (image to video at the clip's own size and frame rate) and the new part is appended
+    const std::string extendFrom = p.str("extend_from");
+    std::vector<std::vector<uint8_t>> origFrames; std::vector<float> origAudio; double origFps = 0;
+    if (!extendFrom.empty()) {
+        ctl.progress(0.005f, "reading the video to extend");
+        int ow = 0, oh = 0;
+        if (!readMp4All(extendFrom, origFrames, ow, oh, origFps, origAudio, err)) return false;
+        gp.fps = std::min(std::max((int)std::lround(origFps), 8), 50);
+        gp.width = gp.upscale ? ow : ow * 2; gp.height = gp.upscale ? oh : oh * 2;                // (the first stage runs at half of the requested size)
+        img.w = ow; img.h = oh; img.px = origFrames.back(); gp.startImage = &img;
+    }
     gp.cancel = [&] { return !ctl.checkpoint(); };
     { char b[64]; snprintf(b, sizeof b, "%dx%d, %.0f s", gp.upscale ? gp.width : gp.width / 2, gp.upscale ? gp.height : gp.height / 2, (double)gp.seconds); ctl.info(b); }
 
@@ -112,15 +124,29 @@ bool runVideo(const Job& job, JobCtl& ctl, std::string& err) {
     }
 
     ctl.progress(0.98f, "writing the MP4");
-    std::vector<std::vector<uint8_t>> store(r.frames.T); std::vector<const uint8_t*> ptrs;
-    for (int t = 0; t < r.frames.T; t++) {
-        store[t].resize((size_t)r.frames.W * r.frames.H * 3);
+    const int firstNew = extendFrom.empty() ? 0 : 1;                           // the new part starts with the last frame of the old one: it is not repeated
+    std::vector<std::vector<uint8_t>> store; std::vector<const uint8_t*> ptrs;
+    const size_t nOld = origFrames.size();
+    store.reserve(origFrames.size() + r.frames.T);
+    for (auto& fr : origFrames) store.push_back(std::move(fr));
+    for (int t = firstNew; t < r.frames.T; t++) {
+        store.emplace_back((size_t)r.frames.W * r.frames.H * 3);
+        std::vector<uint8_t>& dst = store.back();
         for (int y = 0; y < r.frames.H; y++) for (int x = 0; x < r.frames.W; x++) for (int c = 0; c < 3; c++)
-            store[t][((size_t)y * r.frames.W + x) * 3 + c] = (uint8_t)std::clamp((r.frames.at(t, c, y, x) + 1.f) * 127.5f, 0.f, 255.f);
-        ptrs.push_back(store[t].data());
+            dst[((size_t)y * r.frames.W + x) * 3 + c] = (uint8_t)std::clamp((r.frames.at(t, c, y, x) + 1.f) * 127.5f, 0.f, 255.f);
     }
+    for (auto& fr : store) ptrs.push_back(fr.data());
     std::vector<float> inter;
     if (!r.wave.empty()) { inter.resize((size_t)r.waveSamples * 2); for (int i = 0; i < r.waveSamples; i++) { inter[(size_t)i * 2] = r.wave[i]; inter[(size_t)i * 2 + 1] = r.wave[(size_t)r.waveSamples + i]; } }
+    if (!extendFrom.empty() && (!origAudio.empty() || !inter.empty())) {         // old sound track + new one, each cut to exactly the length of its pictures
+        const size_t rate = LtxAudio::kSampleRate, perFrame2 = 2 * rate / (size_t)gp.fps;
+        const size_t nNew = (size_t)(r.frames.T - firstNew);
+        std::vector<float> joined((nOld + nNew) * perFrame2, 0.f);
+        std::copy(origAudio.begin(), origAudio.begin() + std::min(origAudio.size(), nOld * perFrame2), joined.begin());
+        const size_t skip = (size_t)firstNew * perFrame2;
+        if (inter.size() > skip) std::copy(inter.begin() + skip, inter.begin() + std::min(inter.size(), skip + nNew * perFrame2), joined.begin() + nOld * perFrame2);
+        inter = std::move(joined);
+    }
     const std::string file = outputPath("video", job.id, ".mp4");
     if (!writeMp4(file, ptrs, r.frames.W, r.frames.H, gp.fps, inter, 2, LtxAudio::kSampleRate, err)) return false;
     ctl.addOutput(file);
@@ -155,10 +181,7 @@ int runVideoExpandTest(const std::vector<std::string>& a) {
     return r == 0 ? 0 : 1;
 }
 
-
-
-
-
+const char* videoImproveSystemPrompt() { return kVideoSystemPrompt; }
 
 bool expandVideoPromptForTest(const std::string& ggufModel, const std::string& prompt, std::string& out) {
     struct Quiet : JobCtl {

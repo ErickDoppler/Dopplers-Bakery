@@ -115,3 +115,46 @@ bool readMp4Frame(const std::string& path, int frameIndex, std::vector<uint8_t>&
         return true;
     }
 }
+
+bool readMp4All(const std::string& path, std::vector<std::vector<uint8_t>>& frames, int& W, int& H, double& fps, std::vector<float>& audio, std::string& err) {
+    Mf mf; if (!mf.mf) { err = "Media Foundation is not available"; return false; }
+    Rel<IMFAttributes> at; MFCreateAttributes(&at, 1); at->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+    Rel<IMFSourceReader> rd; HRESULT h = MFCreateSourceReaderFromURL(sys::widen(path).c_str(), at.p, &rd);
+    if (FAILED(h)) { err = hr("opening the MP4", h); return false; }
+    Rel<IMFMediaType> want; MFCreateMediaType(&want); want->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video); want->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+    h = rd->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, want.p); if (FAILED(h)) { err = hr("decoder output type", h); return false; }
+    Rel<IMFMediaType> cur; rd->GetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &cur);
+    UINT32 w = 0, hh = 0, fn = 0, fd = 1; MFGetAttributeSize(cur.p, MF_MT_FRAME_SIZE, &w, &hh); W = (int)w; H = (int)hh;
+    MFGetAttributeRatio(cur.p, MF_MT_FRAME_RATE, &fn, &fd); fps = fd ? (double)fn / fd : 24.0;
+    const LONG stride = (LONG)MFGetAttributeUINT32(cur.p, MF_MT_DEFAULT_STRIDE, (UINT32)(W * 4)); const bool bottomUp = stride < 0;
+    // the sound track as 48 kHz stereo float, when there is one
+    Rel<IMFMediaType> an; bool hasAudio = SUCCEEDED(rd->GetNativeMediaType((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, &an));
+    if (hasAudio) {
+        Rel<IMFMediaType> wa; MFCreateMediaType(&wa); wa->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio); wa->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_Float);
+        wa->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2); wa->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000); wa->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 32);
+        wa->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 8); wa->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 48000 * 8);
+        if (FAILED(rd->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, wa.p))) hasAudio = false;
+    }
+    if (!hasAudio) rd->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, FALSE);
+    audio.clear(); frames.clear();
+    bool videoDone = false, audioDone = !hasAudio;
+    while (!videoDone || !audioDone) {
+        const DWORD stream = !videoDone ? (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM : (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM;
+        DWORD idx = 0, flags = 0; LONGLONG ts = 0; Rel<IMFSample> smp;
+        h = rd->ReadSample(stream, 0, &idx, &flags, &ts, &smp);
+        if (FAILED(h)) { err = hr("reading the MP4", h); return false; }
+        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) { if (!videoDone) videoDone = true; else audioDone = true; continue; }
+        if (!smp) continue;
+        Rel<IMFMediaBuffer> buf; smp->ConvertToContiguousBuffer(&buf); BYTE* p = nullptr; DWORD len = 0; buf->Lock(&p, nullptr, &len);
+        if (!videoDone) {
+            std::vector<uint8_t> rgb((size_t)W * H * 3);
+            for (int y = 0; y < H; y++) { const BYTE* row = p + (size_t)(bottomUp ? H - 1 - y : y) * W * 4; for (int x = 0; x < W; x++) { rgb[((size_t)y * W + x) * 3] = row[x * 4 + 2]; rgb[((size_t)y * W + x) * 3 + 1] = row[x * 4 + 1]; rgb[((size_t)y * W + x) * 3 + 2] = row[x * 4]; } }
+            frames.push_back(std::move(rgb));
+        } else {
+            const size_t n = len / 4; const size_t at0 = audio.size(); audio.resize(at0 + n); memcpy(&audio[at0], p, n * 4);
+        }
+        buf->Unlock();
+    }
+    if (frames.empty()) { err = "the MP4 has no video frames"; return false; }
+    return true;
+}

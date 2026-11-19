@@ -18,6 +18,7 @@
 #include "core/suggest.h"
 #include <random>
 #include "core/queue.h"
+#include "backends/engines.h"
 #include "core/settings.h"
 #include "ui/dialogs.h"
 #include "ui/modal.h"
@@ -29,7 +30,7 @@
 namespace {
 
 enum {
-    IDC_CREATE = 1001, IDC_SETTINGS, IDC_OUTLIST, IDC_PREVIEW, IDC_COPY, IDC_DELETE, IDC_PL_PREV, IDC_PL_PLAY, IDC_PL_STOP, IDC_PL_NEXT, IDC_PL_TRK, IDC_EXTEND,
+    IDC_CREATE = 1001, IDC_SETTINGS, IDC_OUTLIST, IDC_PREVIEW, IDC_COPY, IDC_DELETE, IDC_PL_PREV, IDC_PL_PLAY, IDC_PL_STOP, IDC_PL_NEXT, IDC_PL_TRK, IDC_EXTEND, IDC_IMPROVE, IDC_EXTCLIP,
     IDC_FIELD0 = 2000, IDC_BROWSE0 = 2500,
     IDC_QLIST = 3001, IDC_QUP, IDC_QDOWN, IDC_QREMOVE, IDC_QPAUSE, IDC_QCANCEL, IDC_QCLEAR, IDC_QDETAILS, IDC_QPROG, IDC_QSTAT, IDC_QTOGGLE, IDC_QDETAIL,
 
@@ -64,8 +65,16 @@ struct Page {
     // audio tabs: a small player under the list (Prev / Play-Pause / Stop / Next, position bar, what is playing)
     HWND bPrev = nullptr, bPlay = nullptr, bStop = nullptr, bNext = nullptr, trk = nullptr, lblNow = nullptr;
     bool seeking = false;
-    HWND bExtend = nullptr;              // Audio tab: "Extend..." next to the length trackbar (lengths beyond five minutes)
+    HWND bExtend = nullptr;              // Audio tab "Extend..." / Video tab "Expand...": next to the length trackbar (lengths beyond its range)
+    HWND bImprove = nullptr;             // Video / Audio / Image / TTS: "Improve" rewrites the prompt with the chat model (no generation)
+    int improveJob = 0;                  // the internal LLM job that is doing it (0 = none)
+    HWND bExtClip = nullptr;             // Video tab: "Extend..." makes a longer clip from the selected result
 };
+// the length slider that can go beyond its trackbar: Audio "length" (5 min trackbar, 380 s model), Video "seconds" (20 s trackbar)
+const char* extKeyOf(Kind k) { return k == Kind::Audio ? "length" : k == Kind::Video ? "seconds" : ""; }
+int extSliderMax(Kind k) { return k == Kind::Video ? kVideoSliderMax : kAudioSliderMax; }
+int extModelMax(Kind k) { return k == Kind::Video ? kVideoModelMax : kAudioModelMax; }
+bool hasImprove(Kind k) { return k == Kind::Video || k == Kind::Audio || k == Kind::Image || k == Kind::TTS; }
 inline bool pagePlays(const Page& p) { return p.trk != nullptr; }
 
 HWND g_main, g_tab, g_qTitle, g_qList, g_qStat, g_qProg, g_qToggle = nullptr, g_qDetail = nullptr;
@@ -269,7 +278,7 @@ void writeForm(Page& p, const Json& saved) {
         case FT::Check: SendMessageW(c.ctl, BM_SETCHECK, v.isNull() ? f.def != 0 : v.boolean(), 0); break;
         case FT::Slider: {
             double want = v.isNull() ? f.def : v.num();
-            c.ext = (!strcmp(f.key, "length") && want > f.mx) ? (int)want : 0;                 // an extended Audio length survives a restart
+            c.ext = (extKeyOf(p.kind)[0] && !strcmp(f.key, extKeyOf(p.kind)) && want > f.mx) ? (int)want : 0;          // an extended length survives a restart
             SendMessageW(c.ctl, TBM_SETPOS, TRUE, (LPARAM)(c.ext > 0 ? f.mx : want)); sliderLabel(c); break;
         }
         case FT::Int: uiSetText(c.ctl, std::to_string((long long)std::llround(v.isNull() ? f.def : v.num()))); break;
@@ -311,15 +320,23 @@ void layoutForm(Page& p) {
     SCROLLINFO si = {sizeof si, SIF_RANGE | SIF_PAGE | SIF_POS, 0, p.contentH, (UINT)rc.bottom, p.scroll, 0};
     SetScrollInfo(p.form, SB_VERT, &si, TRUE);
     {
-        int createW = (usable - 2 * M - gap) * 68 / 100;
-        uiPlace(p.bCreate, M, p.actY - p.scroll, createW, 44);
-        uiPlace(p.bSettings, M + createW + gap, p.actY - p.scroll, usable - 2 * M - gap - createW, 44);
+        const int rowW = usable - 2 * M;
+        if (p.bImprove) {                                                  // Create | Improve | Model settings
+            const int createW = (rowW - 2 * gap) * 50 / 100, impW = (rowW - 2 * gap) * 18 / 100;
+            uiPlace(p.bCreate, M, p.actY - p.scroll, createW, 44);
+            uiPlace(p.bImprove, M + createW + gap, p.actY - p.scroll, impW, 44);
+            uiPlace(p.bSettings, M + createW + impW + 2 * gap, p.actY - p.scroll, rowW - 2 * gap - createW - impW, 44);
+        } else {
+            const int createW = (rowW - gap) * 68 / 100;
+            uiPlace(p.bCreate, M, p.actY - p.scroll, createW, 44);
+            uiPlace(p.bSettings, M + createW + gap, p.actY - p.scroll, rowW - gap - createW, 44);
+        }
     }
     for (auto& c : p.fc) {
         if (c.label) uiPlace(c.label, c.x, c.ly - p.scroll, c.w, 18);
         uiPlace(c.ctl, c.x, c.cy - p.scroll, c.btn ? c.w - 34 : c.w, c.f->type == FT::Combo ? 260 : c.ch);
         if (c.btn) uiPlace(c.btn, c.x + c.w - 30, c.cy - p.scroll, 30, c.ch);
-        if (p.bExtend && !strcmp(c.f->key, "length")) {                   // Extend... sits right of the (shortened) trackbar
+        if (p.bExtend && !strcmp(c.f->key, extKeyOf(p.kind))) {           // Extend... / Expand... sits right of the (shortened) trackbar
             const int bw = 100;
             uiPlace(c.ctl, c.x, c.cy - p.scroll, c.w - bw - 8, c.ch);
             uiPlace(p.bExtend, c.x + c.w - bw, c.cy - p.scroll, bw, 24);
@@ -347,6 +364,7 @@ void layoutPage(Page& p) {
     uiPlace(p.bPreview, 8, y, bw, 26);
     uiPlace(p.bCopy, 8 + bw + 6, y, bw, 26);
     uiPlace(p.bDelete, 8 + 2 * (bw + 6), y, bw, 26);
+    if (p.bExtClip) uiPlace(p.bExtClip, 8 + 3 * (bw + 6), y, bw, 26);
     if (pagePlays(p)) {
         y += 32;
         uiPlace(p.lblNow, 8, y, W - 16, 18);
@@ -544,6 +562,75 @@ void onCreateClicked(Page& p) {
     JobQueue::get().add(p.kind, params, jobTitle(p.kind, params));
 }
 
+// ----- Improve: the chat model rewrites what is in the prompt box (an internal LLM job; nothing is generated)
+HWND mainPromptCtl(Page& p) {
+    const char* key = p.kind == Kind::TTS ? "text" : "prompt";
+    for (auto& c : p.fc) if (!strcmp(c.f->key, key)) return c.ctl;
+    return nullptr;
+}
+void onImproveClicked(Page& p) {
+    if (p.improveJob) return;
+    HWND box = mainPromptCtl(p);
+    if (box && uiText(box).find_first_not_of(" \r\n\t") == std::string::npos) {          // a blank box: improve the suggestion it shows
+        const std::string sug = ghostOf(box);
+        if (!sug.empty()) uiSetText(box, sug);
+    }
+    Json form = readForm(p), q; std::string err;
+    if (!buildImproveJob(p.kind, form, q, err)) { MessageBoxW(g_main, sys::widen(err).c_str(), L"Dopplers Bakery", MB_OK | MB_ICONINFORMATION); return; }
+    p.improveJob = JobQueue::get().add(Kind::LLM, q, std::string("Improve the ") + kindTitle(p.kind) + " prompt");
+    uiSetText(p.bImprove, "Improving...");
+    EnableWindow(p.bImprove, FALSE);
+}
+void improveTick(Page& p) {                                                              // called by the 300 ms timer
+    if (!p.improveJob) return;
+    Job j;
+    const bool found = JobQueue::get().find(p.improveJob, j);
+    if (found && (j.state == JobState::Queued || j.state == JobState::Held || j.state == JobState::Running || j.state == JobState::Paused)) return;
+    const int id = p.improveJob; p.improveJob = 0;
+    uiSetText(p.bImprove, "Improve"); EnableWindow(p.bImprove, TRUE);
+    if (!found) return;
+    std::string t = j.text;
+    const size_t a = t.find_first_not_of(" \r\n\t");
+    if (j.state == JobState::Done && a != std::string::npos) {
+        t = t.substr(a, t.find_last_not_of(" \r\n\t") - a + 1);
+        std::string n; for (char ch : t) { if (ch == '\n') n += '\r'; if (ch != '\r' || true) n += ch; }
+        HWND box = mainPromptCtl(p);
+        if (box) { SendMessageW(box, EM_SETSEL, 0, -1); SendMessageW(box, EM_REPLACESEL, TRUE, (LPARAM)sys::widen(n).c_str()); SetFocus(box); }   // replaces the text and keeps Ctrl+Z
+    } else if (j.state == JobState::Failed || j.state == JobState::Done) {
+        MessageBoxW(g_main, sys::widen(j.state == JobState::Failed ? "The prompt could not be improved: " + j.error : "The chat model returned nothing.").c_str(), L"Dopplers Bakery", MB_OK | MB_ICONWARNING);
+    }
+    JobQueue::get().remove(id);
+}
+
+// ----- Extend: a longer video from a finished one (its last frame starts the new part; the new part is appended)
+std::string sectionOf(const std::string& text, const char* head) {                       // the block that follows "head:\n" in the sidecar .txt
+    const std::string h = std::string(head) + ":\n";
+    size_t s = text.find(h); if (s == std::string::npos) return "";
+    s += h.size(); size_t e = text.find("\n\n", s);
+    return text.substr(s, e == std::string::npos ? std::string::npos : e - s);
+}
+void onExtendClip(Page& p) {
+    const int sel = ListView_GetNextItem(p.list, -1, LVNI_SELECTED);
+    if (sel < 0 || sel >= (int)p.outs.size()) { MessageBoxW(g_main, L"Select a video in the list first.", L"Dopplers Bakery", MB_OK | MB_ICONINFORMATION); return; }
+    const OutItem it = p.outs[sel];
+    std::string side; sys::readFile(it.path.substr(0, it.path.size() - 4) + ".txt", side);
+    std::string prompt = sectionOf(side, "Expanded prompt used"); if (prompt.empty()) prompt = sectionOf(side, "Prompt");
+    double clipSec = 4; bool upscale = true;
+    { const size_t s = side.find("Size "); if (s != std::string::npos) { const size_t c = side.find(", ", s); if (c != std::string::npos) clipSec = atof(side.c_str() + c + 2); } }
+    upscale = side.find("upscale off") == std::string::npos;
+    const std::string name = it.path.substr(it.path.find_last_of("\\/") + 1);
+    int sec = 0; bool useNew = false; std::string np;
+    const bool ok = askExtendClip(g_main, name, clipSec, (int)std::min(10.0, std::max(1.0, std::round(clipSec))), kVideoModelMax, prompt, sec, useNew, np);
+    RedrawWindow(p.form, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    if (!ok) return;
+    Json form = readForm(p);
+    Json params = makeJobParams(Kind::Video, form);
+    params["extend_from"] = it.path; params["init_image"] = ""; params["seconds"] = (double)sec; params["seed"] = -1.0; params["upscale"] = upscale;
+    params["prompt"] = useNew ? np : prompt;
+    if (!useNew) params["enhance"] = false;                                              // the same prompt: the text that already made the first part, as it was
+    JobQueue::get().add(Kind::Video, params, "Extend: " + jobTitle(Kind::Video, params));
+}
+
 // ----------------------------------------------------------------- page window procs
 // a visible bar with grip dots: the edge between two sections that can be dragged
 void drawSplitter(HDC dc, int x, int y, int w, int h) {
@@ -585,19 +672,24 @@ LRESULT CALLBACK pageProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         case IDC_SETTINGS: if (showModelSettings(g_main, p->kind)) refreshReady(*p); return 0;
         case IDC_PREVIEW: case IDC_COPY: case IDC_DELETE: onOutputAction(*p, LOWORD(wp)); return 0;
         case IDC_EXTEND:                                                // lengths beyond the five-minute trackbar, up to what the model can make
-            for (auto& c : p->fc) if (!strcmp(c.f->key, "length")) {
+            for (auto& c : p->fc) if (!strcmp(c.f->key, extKeyOf(p->kind))) {
+                const int smax = extSliderMax(p->kind), mmax = extModelMax(p->kind);
                 int cur = c.ext > 0 ? c.ext : (int)SendMessageW(c.ctl, TBM_GETPOS, 0, 0), v = 0;
-                if (askNumber(g_main, "Extend the length",
-                              "Length in seconds. The trackbar goes up to " + std::to_string(kAudioSliderMax) + " s (5 minutes); the audio model can make up to " +
-                              std::to_string(kAudioModelMax) + " s (" + std::to_string(kAudioModelMax / 60) + " min " + std::to_string(kAudioModelMax % 60) + " s). Enter the length you want:",
-                              cur, 1, kAudioModelMax, v)) {
-                    c.ext = v > kAudioSliderMax ? v : 0;
-                    SendMessageW(c.ctl, TBM_SETPOS, TRUE, std::min(v, kAudioSliderMax));
+                const std::string msg = p->kind == Kind::Video
+                    ? "Length in seconds. The trackbar goes up to " + std::to_string(smax) + " s; you can ask for up to " + std::to_string(mmax) +
+                      " s, but long clips take much more time and memory (the time grows faster than the length). Enter the length you want:"
+                    : "Length in seconds. The trackbar goes up to " + std::to_string(smax) + " s (5 minutes); the audio model can make up to " +
+                      std::to_string(mmax) + " s (" + std::to_string(mmax / 60) + " min " + std::to_string(mmax % 60) + " s). Enter the length you want:";
+                if (askNumber(g_main, p->kind == Kind::Video ? "Expand the length" : "Extend the length", msg, cur, 1, mmax, v)) {
+                    c.ext = v > smax ? v : 0;
+                    SendMessageW(c.ctl, TBM_SETPOS, TRUE, std::min(v, smax));
                     sliderLabel(c);
                 }
                 RedrawWindow(p->form, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);       // the dialog sat on top of the form
             }
             return 0;
+        case IDC_IMPROVE: onImproveClicked(*p); return 0;
+        case IDC_EXTCLIP: onExtendClip(*p); return 0;
         case IDC_PL_PREV: playerStep(*p, -1); updatePlayer(*p); return 0;
         case IDC_PL_NEXT: playerStep(*p, +1); updatePlayer(*p); return 0;
         case IDC_PL_PLAY: playerToggle(*p); updatePlayer(*p); return 0;
@@ -766,7 +858,8 @@ void buildPage(Page& p, Kind kind) {
         }
         p.fc.push_back(c);
     }
-    if (kind == Kind::Audio) p.bExtend = uiMake(p.form, L"BUTTON", "Extend...", BS_PUSHBUTTON | WS_TABSTOP, IDC_EXTEND);
+    if (kind == Kind::Audio || kind == Kind::Video) p.bExtend = uiMake(p.form, L"BUTTON", kind == Kind::Video ? "Expand..." : "Extend...", BS_PUSHBUTTON | WS_TABSTOP, IDC_EXTEND);
+    if (hasImprove(kind)) { p.bImprove = uiMake(p.form, L"BUTTON", "Improve", BS_PUSHBUTTON | WS_TABSTOP, IDC_IMPROVE); SendMessageW(p.bImprove, WM_SETFONT, (WPARAM)btnFont(false), TRUE); }
     p.bCreate = uiMake(p.form, L"BUTTON", kind == Kind::Audio ? "Create  (F2)" : "Create", BS_OWNERDRAW | WS_TABSTOP, IDC_CREATE);
     SetWindowSubclass(p.bCreate, hoverProc, 1, 0);
     p.bSettings = uiMake(p.form, L"BUTTON", "Model settings...", BS_PUSHBUTTON | WS_TABSTOP, IDC_SETTINGS);
@@ -787,6 +880,7 @@ void buildPage(Page& p, Kind kind) {
     p.bPreview = uiMake(p.hwnd, L"BUTTON", music ? "Play / Stop latest (F3)" : audio ? "Play / Stop" : "Preview", BS_PUSHBUTTON | WS_TABSTOP, IDC_PREVIEW);
     p.bCopy = uiMake(p.hwnd, L"BUTTON", kind == Kind::LLM ? "Copy text" : "Copy file", BS_PUSHBUTTON | WS_TABSTOP, IDC_COPY);
     p.bDelete = uiMake(p.hwnd, L"BUTTON", music ? "Delete (Shift+Del)" : "Delete", BS_PUSHBUTTON | WS_TABSTOP, IDC_DELETE);
+    if (kind == Kind::Video) p.bExtClip = uiMake(p.hwnd, L"BUTTON", "Extend...", BS_PUSHBUTTON | WS_TABSTOP, IDC_EXTCLIP);
     if (audio) {
         p.lblNow = uiMake(p.hwnd, L"STATIC", "Nothing playing", SS_LEFT | SS_ENDELLIPSIS);
         p.bPrev = uiMake(p.hwnd, L"BUTTON", "Prev", BS_PUSHBUTTON | WS_TABSTOP, IDC_PL_PREV);
@@ -1225,7 +1319,7 @@ LRESULT CALLBACK mainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_SIZE: if (wp != SIZE_MINIMIZED && g_tab) layoutMain(); return 0;
     case WM_GETMINMAXINFO: { auto* mm = (MINMAXINFO*)lp; mm->ptMinTrackSize.x = 980; mm->ptMinTrackSize.y = 640; return 0; }
-    case WM_TIMER: refreshQueue(); chatViewTick(); for (auto& pg : g_pages) updatePlayer(pg); return 0;
+    case WM_TIMER: refreshQueue(); chatViewTick(); for (auto& pg : g_pages) { updatePlayer(pg); improveTick(pg); } return 0;
     case WM_SETCURSOR: {
         POINT pt; GetCursorPos(&pt); ScreenToClient(h, &pt);
         RECT sp = splitterRect();

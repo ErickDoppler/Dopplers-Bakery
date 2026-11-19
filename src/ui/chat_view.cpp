@@ -13,7 +13,7 @@
 #include "web/server.h"
 
 namespace {
-enum ItemKind { K_TEXT, K_IMAGE, K_AUDIO, K_NOTE, K_TYPING, K_EMPTY };
+enum ItemKind { K_TEXT, K_IMAGE, K_AUDIO, K_NOTE, K_TYPING, K_EMPTY, K_VIDEO };
 enum HitId { H_NONE = 0, H_IMG, H_AUDIO, H_CHIPX, H_PLUS, H_VOICE, H_SEND, H_COPY, H_SEEK };
 struct Line { int s, e; };
 struct Item { int kind = K_TEXT; bool user = false; int x = 0, y = 0, w = 0, h = 0; std::wstring text; std::string path; std::vector<Line> lines; int lineH = 0;
@@ -53,6 +53,7 @@ std::string fileOf(const std::string& p) { return p.substr(p.find_last_of("\\/")
 bool ends(const std::string& s, const char* e) { std::string l = s; for (auto& c : l) c = (char)tolower((unsigned char)c); size_t n = strlen(e); return l.size() >= n && l.compare(l.size() - n, n, e) == 0; }
 bool isImg(const std::string& p) { for (const char* e : {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp"}) if (ends(p, e)) return true; return false; }
 bool isAud(const std::string& p) { return ends(p, ".mp3") || ends(p, ".wav"); }
+bool isVid(const std::string& p) { return ends(p, ".mp4"); }
 bool inRect(const RECT& r, int x, int y) { return x >= r.left && x < r.right && y >= r.top && y < r.bottom; }
 
 // ------------------------------------------------------------------ sound (the shared player: one thing plays at a time, in the chat or on a tab)
@@ -205,6 +206,9 @@ void buildItems(HDC dc, int W_, int colX, int colW) {
             } else if (isAud(f)) {
                 Item it; it.kind = K_AUDIO; it.path = f; it.w = std::min(340, colW); it.h = 58;
                 y += 8; add(it, user);
+            } else if (isVid(f)) {
+                Item it; it.kind = K_VIDEO; it.path = f; it.w = std::min(340, colW); it.h = 58;
+                y += 8; add(it, user);
             }
         }
     }
@@ -334,6 +338,24 @@ void paintItem(HDC dc, const Item& it, int yy) {
     case K_IMAGE: {
         const Thumb& t = thumbOf(it.path, 360);
         drawThumb(dc, t, it.x, yy, it.w, it.h, 0, 0, t.w ? t.w : 1, t.h ? t.h : 1, 14);
+        break;
+    }
+    case K_VIDEO: {                                                     // a pill with a play triangle: a click opens the video in the default player
+        RECT r = {it.x, yy, it.x + it.w, yy + it.h};
+        fillRound(dc, r, cPanel, cLine, 23);
+        RECT cb = {r.left + 9, r.top + 11, r.left + 41, r.top + 43};
+        fillCircle(dc, cb, cText);
+        HBRUSH wb = CreateSolidBrush(RGB(255, 255, 255)); HPEN wp = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
+        HGDIOBJ ob = SelectObject(dc, wb), op = SelectObject(dc, wp);
+        const int cx = (cb.left + cb.right) / 2, cy = (cb.top + cb.bottom) / 2;
+        POINT tri[3] = {{cx - 4, cy - 7}, {cx - 4, cy + 7}, {cx + 7, cy}}; Polygon(dc, tri, 3);
+        SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(wb); DeleteObject(wp);
+        SetTextColor(dc, cText); SelectObject(dc, g_fs);
+        std::wstring label = L"Video  •  " + W(fileOf(it.path));
+        RECT tr = {r.left + 52, r.top + 8, r.right - 16, r.top + 28};
+        DrawTextW(dc, label.c_str(), -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        SetTextColor(dc, cMute); RECT t2 = {r.left + 52, r.top + 30, r.right - 16, r.top + 50};
+        DrawTextW(dc, L"click to play", -1, &t2, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
         break;
     }
     case K_AUDIO: {
@@ -510,8 +532,8 @@ Hit* hitAt(int x, int y, Hit& out) {
                 out = {{it.x + 52, it.y + 30, it.x + it.w - 16, it.y + 52}, H_SEEK, (int)i, it.path};
                 return &out;
             }
-            if ((it.kind == K_IMAGE || it.kind == K_AUDIO) && x >= it.x && x < it.x + it.w && y + g_scroll >= it.y && y + g_scroll < it.y + it.h) {
-                out = {{it.x, it.y, it.x + it.w, it.y + it.h}, it.kind == K_IMAGE ? H_IMG : H_AUDIO, (int)i, it.path};
+            if ((it.kind == K_IMAGE || it.kind == K_AUDIO || it.kind == K_VIDEO) && x >= it.x && x < it.x + it.w && y + g_scroll >= it.y && y + g_scroll < it.y + it.h) {
+                out = {{it.x, it.y, it.x + it.w, it.y + it.h}, it.kind == K_AUDIO ? H_AUDIO : H_IMG, (int)i, it.path};      // (a video opens like a picture: in the default program)
                 return &out;
             }
         }

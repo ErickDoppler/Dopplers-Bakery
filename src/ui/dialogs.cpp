@@ -322,3 +322,55 @@ bool askNumber(HWND parent, const std::string& title, const std::string& prompt,
     return d.ok;
 }
 
+
+// =============================================================== extend a video
+namespace {
+struct ExtendDlg : Modal {
+    std::string clipName, samePrompt, newPrompt; double clipSeconds = 0; int proposed = 4, maxSec = 60, seconds = 0; bool useNew = false, ok = false;
+    HWND edit = nullptr, rSame = nullptr, rNew = nullptr, box = nullptr, shown = nullptr;
+    enum { ID_SAME = 20, ID_NEW = 21 };
+    void onCreate() override {
+        const int W = 560;
+        char b[300]; snprintf(b, sizeof b, "Extend %s (%.1f s long). The last frame of the clip starts the new part, which is appended to it; the result is saved as a new video.", clipName.c_str(), clipSeconds);
+        uiPlace(uiMake(hwnd, L"STATIC", b, SS_LEFT), 14, 12, W - 28, 36);
+        uiPlace(uiMake(hwnd, L"STATIC", "Seconds to add (the app proposes the length of the clip, at most 10 s):", SS_LEFT), 14, 56, W - 28, 18);
+        edit = uiMake(hwnd, L"EDIT", std::to_string(proposed), ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP, 10, WS_EX_CLIENTEDGE);
+        uiPlace(edit, 14, 78, 90, 26);
+        rSame = uiMake(hwnd, L"BUTTON", "Use the same prompt", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, ID_SAME);
+        rNew = uiMake(hwnd, L"BUTTON", "Use a new prompt", BS_AUTORADIOBUTTON | WS_TABSTOP, ID_NEW);
+        uiPlace(rSame, 14, 116, 240, 22); uiPlace(rNew, 270, 116, 240, 22);
+        SendMessageW(rSame, BM_SETCHECK, BST_CHECKED, 0);
+        shown = uiMake(hwnd, L"EDIT", samePrompt, ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, 11, WS_EX_CLIENTEDGE);   // the prompt that will be used again
+        std::string n; for (size_t i = 0; i < samePrompt.size(); i++) { if (samePrompt[i] == '\n' && (i == 0 || samePrompt[i - 1] != '\r')) n += '\r'; n += samePrompt[i]; }
+        uiSetText(shown, n);
+        uiPlace(shown, 14, 144, W - 28, 130);
+        box = uiMake(hwnd, L"EDIT", "", ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_TABSTOP, 12, WS_EX_CLIENTEDGE);
+        uiPlace(box, 14, 144, W - 28, 130);
+        ShowWindow(box, SW_HIDE);
+        uiPlace(uiMake(hwnd, L"BUTTON", "Extend", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK), W - 200, 288, 90, 28);
+        uiPlace(uiMake(hwnd, L"BUTTON", "Cancel", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL), W - 104, 288, 90, 28);
+        SetFocus(edit); SendMessageW(edit, EM_SETSEL, 0, -1);
+    }
+    void onCommand(int id, int) override {
+        if (id == ID_SAME || id == ID_NEW) {
+            const bool n = id == ID_NEW;
+            ShowWindow(shown, n ? SW_HIDE : SW_SHOW); ShowWindow(box, n ? SW_SHOW : SW_HIDE);
+            if (n) SetFocus(box);
+        } else if (id == IDOK) {
+            const int v = atoi(uiText(edit).c_str());
+            if (v < 1 || v > maxSec) { MessageBoxW(hwnd, sys::widen("Enter a number of seconds from 1 to " + std::to_string(maxSec) + ".").c_str(), L"Dopplers Bakery", MB_OK | MB_ICONINFORMATION); return; }
+            useNew = SendMessageW(rNew, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            std::string t = uiText(box); std::string c; for (size_t i = 0; i < t.size(); i++) { if (t[i] == '\r' && i + 1 < t.size() && t[i + 1] == '\n') continue; c += t[i]; }
+            if (useNew && c.find_first_not_of(" \r\n\t") == std::string::npos) { MessageBoxW(hwnd, L"Type the new prompt, or choose \"Use the same prompt\".", L"Dopplers Bakery", MB_OK | MB_ICONINFORMATION); return; }
+            seconds = v; newPrompt = c; ok = true; close();
+        } else if (id == IDCANCEL) close();
+    }
+};
+}  // namespace
+
+bool askExtendClip(HWND parent, const std::string& clipName, double clipSeconds, int proposed, int maxSeconds, const std::string& samePrompt, int& seconds, bool& useNew, std::string& newPrompt) {
+    ExtendDlg d; d.clipName = clipName; d.clipSeconds = clipSeconds; d.proposed = std::min(std::max(proposed, 1), maxSeconds); d.maxSec = maxSeconds; d.samePrompt = samePrompt;
+    runModal(d, parent, "Extend the video", 560, 330);
+    if (d.ok) { seconds = d.seconds; useNew = d.useNew; newPrompt = d.newPrompt; }
+    return d.ok;
+}

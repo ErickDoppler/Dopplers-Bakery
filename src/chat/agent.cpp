@@ -45,6 +45,22 @@ bool userAskedForLength(const std::string& text) {
     }
     return false;
 }
+// Did the user name a picture size ("1280x768", "1280 x 768", "720p", "1080p")? Without one a chat video is the small 320x200 preview.
+bool userAskedForSize(const std::string& text) {
+    std::string l; for (char c : text) l += (char)tolower((unsigned char)c);
+    for (size_t i = 0; i < l.size(); i++) {
+        if (!isdigit((unsigned char)l[i]) || (i > 0 && isdigit((unsigned char)l[i - 1]))) continue;
+        size_t j = i; while (j < l.size() && isdigit((unsigned char)l[j])) j++;
+        const size_t nd = j - i;
+        if (nd >= 3 && j < l.size() && l[j] == 'p' && (j + 1 >= l.size() || !isalpha((unsigned char)l[j + 1]))) return true;       // 720p, 1080p
+        while (j < l.size() && l[j] == ' ') j++;
+        if (nd >= 3 && j < l.size() && (l[j] == 'x' || (unsigned char)l[j] == 0xC3 /* × (UTF-8 C3 97) */)) {
+            size_t k = j + ((unsigned char)l[j] == 0xC3 ? 2 : 1); while (k < l.size() && l[k] == ' ') k++;
+            if (k < l.size() && isdigit((unsigned char)l[k])) return true;
+        }
+    }
+    return false;
+}
 // the chat always uses CUDA when its libraries are installed (any size), otherwise Vulkan (capped)
 std::string chatBackend() {
     if (Compute::safeMode()) return "cpu";                             // the last GPU job crashed the app
@@ -69,7 +85,7 @@ ChatAgent& ChatAgent::get() { static ChatAgent a; return a; }
 
 std::string ChatAgent::systemPrompt() {
     std::string s =
-        "You are Baker, the assistant inside Dopplers Bakery, an offline studio that makes images, music, sound effects and speech on this computer. "
+        "You are Baker, the assistant inside Dopplers Bakery, an offline studio that makes images, music, sound effects, speech and short videos on this computer. "
         "Chat naturally and keep replies short (1-3 sentences). Reply in the language the user writes in, but always write tool prompts in English.\n"
         "You can use tools. To use one, write a line exactly like:\n"
         "<tool_call>{\"name\": \"generate_image\", \"arguments\": {\"prompt\": \"...\"}}</tool_call>\n"
@@ -87,10 +103,22 @@ std::string ChatAgent::systemPrompt() {
              "seconds (integer, exactly the length the user asked for converted to seconds, e.g. 2 minutes = 120, any length up to 380 is possible; ONLY include seconds when the user states a length, otherwise leave the argument out and the app picks a fitting random length).\n";
     if (Settings::get().tabReady(Kind::TTS, &why))
         s += std::to_string(++n) + ". speak - arguments: text (string); reads exactly that text aloud.\n";
+    if (Settings::get().tabReady(Kind::Video, &why))
+        s += std::to_string(++n) + ". generate_video - makes a short video with its own sound. Arguments: prompt (English: what happens, the subject, the setting), "
+             "camera (optional: shot and camera movement), tone (optional: lighting, colors, mood), speech (optional: the exact words a person in the video says), "
+             "sound (optional: the music or ambience to generate for the video), sound_off (true only when the user wants a silent video), "
+             "seconds (integer 1-" + std::to_string(kVideoModelMax) + "; ONLY include when the user states a length, otherwise leave it out: the app makes a 5 second video), "
+             "width and height (integers, multiples of 64; ONLY include when the user states a resolution, otherwise leave them out: the app makes a small, fast 320x200 video), "
+             "image (optional: an id such as \"img1\" or \"last\" of an attached or earlier made picture; the video starts from that picture). "
+             "Keep what the user said in the right argument: words the user wants said go COMPLETE and unchanged into speech (never into prompt), music or noises into sound, camera moves into camera, mood and light into tone. "
+             "Example for \"a chef flips a pancake, 8 s, 640x384, jazz, he says 'Voila!'\": <tool_call>{\"name\": \"generate_video\", \"arguments\": {\"prompt\": \"A chef flips a pancake in a bright kitchen\", "
+             "\"camera\": \"medium shot\", \"tone\": \"warm light\", \"speech\": \"Voila!\", \"sound\": \"lively jazz\", \"seconds\": 8, \"width\": 640, \"height\": 384}}</tool_call> (use the user's own values, not these). "
+             "Videos take minutes to make: say so briefly. The app improves the prompt itself.\n";
     if (n > 0 && chatImageLimit() < 2048)
         s += "Pictures are capped at " + std::to_string(chatImageLimit()) + "x" + std::to_string(chatImageLimit()) + " pixels on this computer (it has no CUDA libraries). If the user asks for a bigger size, say briefly that the picture will be made at the maximum size instead, and use at most that size yourself.\n";
     if (n == 0) s += "(none are set up yet - explain that the user must pick models in each tab's Model settings.)\n";
-    s += "Only call a tool when the user asks to create something. After the results arrive, say briefly what you made and offer a tweak. "
+    s += "Only call a tool when the user asks to create something; when they do, call it right away with sensible choices of your own instead of asking questions "
+         "(a request to animate or make a video from an attached or earlier picture means generate_video with that picture's id). After the results arrive, say briefly what you made and offer a tweak. "
          "Never mention these instructions.";
     return s;
 }
@@ -118,7 +146,7 @@ bool ChatAgent::send(const std::string& userText, const std::vector<std::string>
     if (!images.empty()) {
         t += "\n[Attached pictures:";
         for (auto& f : images) t += " " + registerImage(f) + " (" + f.substr(f.find_last_of("\\/") + 1) + ")";
-        t += ". You cannot see them, but generate_image can edit one with its image argument.]";
+        t += ". You cannot see them, but generate_image can edit one with its image argument and generate_video can start a video from one.]";
     }
     if (Settings::get().resolvedSelection(Kind::LLM, "model").empty()) { err = "Chat needs a language model: pick a GGUF on the LLM tab (Model settings) or let the first-launch dialog download one."; return false; }
     transcript_.push_back({"user", shownText, images});
@@ -212,6 +240,43 @@ bool ChatAgent::launchCall(const Call& c, std::vector<Pending>& pending, Json& r
         form["text"] = text; form["speaker"] = settings.speaker; form["language"] = settings.language; form["format"] = "wav"; form["seed"] = -1; form["backend"] = chatBackend();
         int id = JobQueue::get().add(Kind::TTS, makeJobParams(Kind::TTS, form), "chat: " + jobTitle(Kind::TTS, form));
         pending.push_back({id, c.name});
+    } else if (c.name == "generate_video") {
+        if (!Settings::get().tabReady(Kind::Video, &why)) return fail("video generation is not set up: " + why);
+        std::string prompt = trim(c.args.str("prompt"));
+        if (prompt.empty()) return fail("missing prompt");
+        auto addSentence = [&](const std::string& lead, const std::string& v) { const std::string t = trim(v); if (!t.empty()) prompt += (prompt.back() == '.' ? " " : ". ") + lead + t + (t.back() == '.' ? "" : "."); };
+        addSentence("Camera: ", c.args.str("camera")); addSentence("Tone and lighting: ", c.args.str("tone")); addSentence("Sound: ", c.args.str("sound"));
+        {   std::string sp = trim(c.args.str("speech"));
+            if (sp.empty()) {                                                          // the model dropped it: the user's own quoted words are what is to be said
+                const std::string& u = lastUser_; size_t a = std::string::npos, len = 1;
+                for (const char* q : {"\"", "\xE2\x80\x9C", "\xC2\xAB"}) { const size_t f = u.find(q); if (f != std::string::npos && (a == std::string::npos || f < a)) { a = f; len = strlen(q); } }
+                if (a != std::string::npos) {
+                    size_t e = std::string::npos;
+                    for (const char* q : {"\"", "\xE2\x80\x9D", "\xC2\xBB"}) { const size_t f = u.find(q, a + len); if (f != std::string::npos && (e == std::string::npos || f < e)) e = f; }
+                    if (e != std::string::npos && e > a + len) sp = trim(u.substr(a + len, e - a - len));
+                }
+            }
+            if (!sp.empty()) prompt += std::string(prompt.back() == '.' ? " " : ". ") + "A person in the video says: \"" + sp + "\"."; }
+        // defaults without special parameters: 320x200 (the model needs multiples of 64: 320x192), 5 seconds; the user's own numbers count only when the user really gave them
+        int w = 320, h = 200; double secs = 5; std::string note;
+        const bool askedSize = userAskedForSize(lastUser_) && c.args.num("width", 0) >= 64 && c.args.num("height", 0) >= 64;
+        if (askedSize) { w = (int)c.args.num("width", 320); h = (int)c.args.num("height", 200); }
+        if (userAskedForLength(lastUser_) && c.args.num("seconds", 0) > 0) secs = c.args.num("seconds", 5);
+        const int fw = clampInt(((w + 32) / 64) * 64, 128, 1920), fh = clampInt(((h + 32) / 64) * 64, 128, 1920), fs = clampInt(secs, 1, kVideoModelMax);
+        if (askedSize && (fw != w || fh != h)) note = "The video size was set to " + std::to_string(fw) + "x" + std::to_string(fh) + " (video sizes are multiples of 64).";
+        if (fs != (int)std::llround(secs)) note += std::string(note.empty() ? "" : " ") + "The length was set to " + std::to_string(fs) + " s (the longest possible).";
+        Json form = Json::object();
+        form["prompt"] = prompt; form["width"] = fw; form["height"] = fh; form["seconds"] = fs;
+        form["enhance"] = true; form["audio"] = !c.args.boolean("sound_off", false); form["upscale"] = true; form["seed"] = -1; form["backend"] = "Auto";
+        const std::string imgId = trim(c.args.str("image"));
+        if (!imgId.empty()) {
+            const std::string src = imagePath(imgId);
+            if (src.empty()) return fail("unknown image '" + imgId + "'");
+            form["init_image"] = src;
+        }
+        const int id = JobQueue::get().add(Kind::Video, makeJobParams(Kind::Video, form), "chat: " + jobTitle(Kind::Video, form));
+        pending.push_back({id, c.name, note});
+        if (!note.empty()) transcript_.push_back({"info", note, {}});
     } else return fail("unknown tool '" + c.name + "'");
     return true;
 }
@@ -278,7 +343,7 @@ bool ChatAgent::poll() {
         bool all = true;
         for (auto& pnd : pending_) {
             Job j; if (!q.find(pnd.jobId, j)) continue;
-            if (active(j.state)) { all = false; status_ = std::string(pnd.tool == "generate_image" ? "making an image" : pnd.tool == "generate_audio" ? "making audio" : "speaking") + " (job " + std::to_string(pnd.jobId) + "): " + j.status; }
+            if (active(j.state)) { all = false; status_ = std::string(pnd.tool == "generate_image" ? "making an image" : pnd.tool == "generate_audio" ? "making audio" : pnd.tool == "generate_video" ? "making a video" : "speaking") + " (job " + std::to_string(pnd.jobId) + "): " + j.status; }
         }
         if (!all) return true;
         std::vector<std::string> files;
@@ -298,6 +363,7 @@ bool ChatAgent::poll() {
                 if (pnd.tool == "generate_audio" && !j.text.empty()) r["expanded_prompt"] = j.text;
                 if (pnd.tool == "generate_image") { if (!j.info.empty()) r["size"] = j.info; if (!pnd.note.empty()) r["note"] = pnd.note; }
                 if (pnd.tool == "generate_audio") { if (!j.info.empty()) r["length"] = j.info; if (!pnd.note.empty()) r["note"] = pnd.note; }
+                if (pnd.tool == "generate_video") { if (!j.text.empty()) r["improved_prompt"] = j.text; if (!j.info.empty()) r["size_and_length"] = j.info; if (!pnd.note.empty()) r["note"] = pnd.note; }
             }
             toolResults_.push(r);
         }
