@@ -10,7 +10,7 @@ inline const char* kindKey(Kind k) {
     switch (k) { case Kind::LLM: return "llm"; case Kind::TTS: return "tts"; case Kind::Image: return "image"; case Kind::Video: return "video"; default: return "audio"; }
 }
 inline const char* kindTitle(Kind k) {
-    switch (k) { case Kind::LLM: return "LLM"; case Kind::TTS: return "TTS"; case Kind::Image: return "Text to image"; case Kind::Video: return "Text/Image to video"; default: return "Audio"; }
+    switch (k) { case Kind::LLM: return "LLM"; case Kind::TTS: return "TTS"; case Kind::Image: return "Image"; case Kind::Video: return "Video"; default: return "Audio"; }
 }
 inline Kind kindFromKey(const std::string& s) {
     for (int i = 0; i < kKindCount; i++) if (s == kindKey((Kind)i)) return (Kind)i;

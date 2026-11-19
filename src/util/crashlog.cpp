@@ -27,7 +27,7 @@ void appendRaw(const std::string& line) {
 void report(const std::string& title, const std::string& detail) {
     appendRaw(title + ": " + detail + " | doing: " + g_context);
     std::string msg = title + "\n\n" + detail + (g_context.empty() ? "" : "\n\nWhat was running: " + g_context) +
-                      "\n\nThe details are in bakery.log next to the program. Start the app again; if it keeps happening, choose Backend = CPU on the Text to image tab.";
+                      "\n\nThe details are in bakery.log next to the program. Start the app again; if it keeps happening, choose Backend = CPU on the Image tab.";
     MessageBoxW(nullptr, sys::widen(msg).c_str(), L"Dopplers Bakery stopped", MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);
 }
 

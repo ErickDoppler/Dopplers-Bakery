@@ -1256,7 +1256,7 @@ void firstRun() {
     if (!g_recovered.empty()) {                                   // the previous run ended inside a GPU job: explain and what changed
         std::string what = g_recovered; g_recovered.clear();
         MessageBoxW(g_main, sys::widen("The previous session ended unexpectedly while it was working on:\n\n" + what +
-                    "\n\nTo avoid another crash, pictures, speech and audio now use the CPU (slower but safe). To try the GPU again choose Backend = Vulkan on the Text to image tab; "
+                    "\n\nTo avoid another crash, pictures, speech and audio now use the CPU (slower but safe). To try the GPU again choose Backend = Vulkan on the Image tab; "
                     "if that job succeeds the app goes back to using the GPU on its own.\n\nTechnical details are in bakery.log next to the program.").c_str(),
                     L"Dopplers Bakery", MB_OK | MB_ICONWARNING);
     }
