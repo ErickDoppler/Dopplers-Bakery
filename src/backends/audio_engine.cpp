@@ -193,3 +193,6 @@ bool runAudio(const Job& job, JobCtl& ctl, std::string& err) {
     ctl.progress(1.0f, done);
     return true;
 }
+
+size_t audioModelsMB() { return g.dit.loaded() ? (size_t)((sys::fileSize(g.ckptPath) + sys::fileSize(g.tePath)) >> 20) : 0; }
+void releaseAudioModels() { g.te.unload(); g.dit.unload(); g.vae.unload(); g.tePath.clear(); g.ckptPath.clear(); }

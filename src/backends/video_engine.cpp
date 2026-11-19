@@ -107,7 +107,6 @@ bool runVideo(const Job& job, JobCtl& ctl, std::string& err) {
     const auto t0 = std::chrono::steady_clock::now();
     ctl.progress(0.0f, "opening the model files");
     std::string cerr;
-    if (freeRamMB() < 50000) releaseImageModels();                              // the image models (about 20 GB) go when RAM is short: paging would make both jobs crawl
     if (!g_models.open(f, gp.loraStrength, err)) return false;
     // Auto = CUDA when its libraries are installed (measured about 30 % faster than Vulkan on an RTX 3080 Ti), otherwise Vulkan
     std::string want = p.str("backend", "auto");
@@ -198,3 +197,9 @@ bool expandVideoPromptForTest(const std::string& ggufModel, const std::string& p
     return expandVideoPrompt(p, job, prompt, 4.0, ctl, out, note) == 0;
 }
 
+
+// the merged / converted copies of the LTX weights are far bigger than the files (measured: about 100 GB in the whole app)
+size_t videoModelsMB() {
+    if (g_models.files.checkpoint.empty()) return 0;
+    return (size_t)((sys::fileSize(g_models.files.checkpoint) + sys::fileSize(g_models.files.gemma)) * 22 / 10 >> 20);
+}

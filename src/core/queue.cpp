@@ -1,5 +1,6 @@
 #include "core/queue.h"
 #include <algorithm>
+#include "backends/engines.h"
 #include "util/crashlog.h"
 #include "util/sys.h"
 
@@ -153,6 +154,7 @@ void JobQueue::loop() {
         std::string err;
         bool ok = false;
         try {
+            prepareForJob(job.kind, job.params);                                  // frees other tabs' big models when RAM is short
             BackendFn fn = backendFor(job.kind);
             ok = fn(job, ctl, err);
         } catch (const std::exception& e) { err = std::string("exception: ") + e.what(); }

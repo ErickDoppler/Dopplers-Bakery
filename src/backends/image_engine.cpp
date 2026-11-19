@@ -40,10 +40,8 @@ std::string trim(const std::string& s) { size_t a = s.find_first_not_of(" \r\n\t
 static const bool g_hookImage = (Compute::get().addResetHook([] { g.te.unload(); g.dit.unload(); g.vae.unload(); g.venc.unload(); g.tePath.clear(); g.ditKey.clear(); g.vaePath.clear(); g.vencPath.clear(); }), true);
 
 void releaseImageModels() { g.te.unload(); g.dit.unload(); g.vae.unload(); g.venc.unload(); g.tePath.clear(); g.ditKey.clear(); g.vaePath.clear(); g.vencPath.clear(); }
-size_t freeRamMB() { MEMORYSTATUSEX ms = {sizeof ms}; GlobalMemoryStatusEx(&ms); return (size_t)(ms.ullAvailPhys >> 20); }
 
 bool runImage(const Job& job, JobCtl& ctl, std::string& err) {
-    if (!g.dit.loaded() && freeRamMB() < 26000) { releaseVideoModels(); logLine("image: free RAM was low, the video models were released"); }          // both sets together do not fit: the machine would page for minutes
     const Json& p = job.params;
     std::string ditPath = p.str("model"), tePath = p.str("clip"), vaePath = p.str("vae"), loraPath = p.str("lora");
     if (ditPath.empty() || tePath.empty() || vaePath.empty()) { err = "Select the diffusion model, text encoder and VAE in [Settings]."; return false; }
@@ -272,4 +270,11 @@ bool runImage(const Job& job, JobCtl& ctl, std::string& err) {
     ctl.progress(1.0f, done);
     if (guard.on && Compute::safeMode()) { Compute::setSafeMode(false); Settings::get().setUiInt("safe_cpu", 0); }      // a GPU job worked again: leave the safe mode
     return true;
+}
+
+// what the cached image models hold in RAM (8-bit weights are about the size of the FP8 files)
+size_t imageModelsMB() {
+    if (!g.dit.loaded()) return 0;
+    const size_t bar = g.ditKey.find('|');
+    return (size_t)((sys::fileSize(bar == std::string::npos ? g.ditKey : g.ditKey.substr(0, bar)) + sys::fileSize(g.tePath)) >> 20);
 }

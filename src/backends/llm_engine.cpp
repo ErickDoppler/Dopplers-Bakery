@@ -161,3 +161,5 @@ bool runLLM(const Job& job, JobCtl& ctl, std::string& err) {
 }
 
 
+
+size_t llmModelMB() { return g_cache.model ? (size_t)(sys::fileSize(g_cache.path) >> 20) : 0; }

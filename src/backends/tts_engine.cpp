@@ -148,3 +148,6 @@ bool runTTS(const Job& job, JobCtl& ctl, std::string& err) {
     ctl.progress(1.0f, done);
     return true;
 }
+
+size_t ttsModelsMB() { return g.dir.empty() ? 0 : (size_t)(sys::fileSize(sys::join(g.dir, "model.safetensors")) >> 20); }
+void releaseTtsModels() { g.talker.unload(); g.decoder.unload(); g.spk.unload(); g.codec.unload(); g.dir.clear(); g.spkDir.clear(); g.codecDir.clear(); }
