@@ -1,4 +1,5 @@
 #include "krea2/dit.h"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -82,7 +83,7 @@ static void applyLora(const StFile& lora, const std::string& weightName, std::ve
 }
 
 namespace {
-struct LoadJob { ggml_tensor* t; std::string name; int mode; };   // 0 fp8/bf16 matrix, 1 float vector, 2 float vector + 1
+struct LoadJob { ggml_tensor* t; std::string name; int mode; bool perm = false; };   // 0 fp8/bf16 matrix, 1 float vector, 2 float vector + 1; perm: rotary dimension order (see store)
 
 }
 
@@ -108,27 +109,27 @@ bool Krea2DiT::load(const std::string& path, int threads, std::string& err, cons
     std::vector<LoadJob> jobs;
     bool okAll = true;
     auto fail = [&](const std::string& n) { if (okAll) err = "missing or unsupported tensor " + n; okAll = false; return (ggml_tensor*)nullptr; };
-    auto mat = [&](const std::string& rel) -> ggml_tensor* {
+    auto mat = [&](const std::string& rel, bool perm = false) -> ggml_tensor* {
         std::string n = P + rel; const StTensor* t = st->find(n);
         if (!t || t->shape.size() != 2) return fail(n);
         ggml_type ty = t->dtype == "F8_E4M3" ? (getenv("BAKERY_DIT_F16") ? GGML_TYPE_F16 : qt) : (t->dtype == "BF16" ? GGML_TYPE_BF16 : GGML_TYPE_COUNT);
         if (ty == GGML_TYPE_COUNT) return fail(n);
         ggml_tensor* g = ggml_new_tensor_2d(ctx_, ty, t->shape[1], t->shape[0]);
-        ggml_set_name(g, n.c_str()); jobs.push_back({g, n, 0}); return g;
+        ggml_set_name(g, n.c_str()); jobs.push_back({g, n, 0, perm}); return g;
     };
-    auto vec = [&](const std::string& rel, bool plusOne) -> ggml_tensor* {
+    auto vec = [&](const std::string& rel, bool plusOne, bool perm = false) -> ggml_tensor* {
         std::string n = P + rel; const StTensor* t = st->find(n);
         if (!t) return fail(n);
         ggml_tensor* g = t->shape.size() == 1 ? ggml_new_tensor_1d(ctx_, GGML_TYPE_F32, t->shape[0])
                                               : ggml_new_tensor_2d(ctx_, GGML_TYPE_F32, t->shape[1], t->shape[0]);
-        ggml_set_name(g, n.c_str()); jobs.push_back({g, n, plusOne ? 2 : 1}); return g;
+        ggml_set_name(g, n.c_str()); jobs.push_back({g, n, plusOne ? 2 : 1, perm}); return g;
     };
     auto block = [&](const std::string& p, bool withMod) {
         Blk b;
         if (withMod) b.mod = vec(p + "mod.lin", false);
         b.pre = vec(p + "prenorm.scale", true); b.post = vec(p + "postnorm.scale", true);
-        b.qn = vec(p + "attn.qknorm.qnorm.scale", true); b.kn = vec(p + "attn.qknorm.knorm.scale", true);
-        b.wq = mat(p + "attn.wq.weight"); b.wk = mat(p + "attn.wk.weight"); b.wv = mat(p + "attn.wv.weight");
+        b.qn = vec(p + "attn.qknorm.qnorm.scale", true, withMod); b.kn = vec(p + "attn.qknorm.knorm.scale", true, withMod);
+        b.wq = mat(p + "attn.wq.weight", withMod); b.wk = mat(p + "attn.wk.weight", withMod); b.wv = mat(p + "attn.wv.weight");
         b.gate = mat(p + "attn.gate.weight"); b.wo = mat(p + "attn.wo.weight");
         b.mg = mat(p + "mlp.gate.weight"); b.mu = mat(p + "mlp.up.weight"); b.md = mat(p + "mlp.down.weight");
         return b;
@@ -151,6 +152,17 @@ bool Krea2DiT::load(const std::string& path, int threads, std::string& err, cons
 
     std::atomic<size_t> next{0}, done{0};
     std::atomic<bool> bad{false};
+    // q / k of the image blocks: the 128 dims of every head are stored as (x0 of the 64 pairs, then x1 of the pairs) instead of interleaved (x0 x1 x0 x1 ...), so that
+    // the rotary embedding is one ggml_rope_multi call (neox pairs). q.k dot products do not change when q and k are permuted the same way; v is untouched.
+    auto store = [&](LoadJob& j, std::vector<uint8_t>& q) {
+        if (j.perm) {
+            const size_t rows = (size_t)j.t->ne[1], rb = q.size() / rows;
+            std::vector<uint8_t> tmp(q.size());
+            for (size_t r = 0; r < rows; r++) { const size_t h = r / 128, w = r % 128; memcpy(&tmp[(h * 128 + (w & 1) * 64 + (w >> 1)) * rb], &q[r * rb], rb); }
+            q.swap(tmp);
+        }
+        ggml_backend_tensor_set(j.t, q.data(), 0, q.size());
+    };
     auto worker = [&]() {
         std::vector<float> f; std::vector<uint8_t> q;
         for (;;) {
@@ -169,7 +181,7 @@ bool Krea2DiT::load(const std::string& path, int threads, std::string& err, cons
                         f.resize((size_t)ne0); q.resize(ggml_nbytes(j.t));
 #if 1
                         if (qt == GGML_TYPE_Q8_0 && fp8MatrixToQ8(t->data, lut, ne0, rows, q.data())) {
-                            ggml_backend_tensor_set(j.t, q.data(), 0, q.size());
+                            store(j, q);
                             size_t d2 = ++done;
                             if (progress && d2 % 32 == 0) progress((float)d2 / jobs.size());
                             continue;
@@ -180,7 +192,7 @@ bool Krea2DiT::load(const std::string& path, int threads, std::string& err, cons
                             for (int64_t k = 0; k < ne0; k++) f[k] = lut[src[k]];
                             ggml_quantize_chunk(qt, f.data(), q.data() + (size_t)r * rb, 0, 1, ne0, nullptr);
                         }
-                        ggml_backend_tensor_set(j.t, q.data(), 0, q.size());
+                        store(j, q);
                         size_t d = ++done;
                         if (progress && d % 32 == 0) progress((float)d / jobs.size());
                         continue;
@@ -190,11 +202,12 @@ bool Krea2DiT::load(const std::string& path, int threads, std::string& err, cons
                     q.resize(ggml_nbytes(j.t));
                     if (j.t->type == GGML_TYPE_F16) ggml_fp32_to_fp16_row(f.data(), (ggml_fp16_t*)q.data(), f.size());
                     else ggml_quantize_chunk(qt, f.data(), q.data(), 0, j.t->ne[1], j.t->ne[0], nullptr);
-                    ggml_backend_tensor_set(j.t, q.data(), 0, q.size());
-                } else ggml_backend_tensor_set(j.t, t->data, 0, ggml_nbytes(j.t));
+                    store(j, q);
+                } else { q.assign(t->data, t->data + ggml_nbytes(j.t)); store(j, q); }
             } else {
                 if (!st->toFloat(*t, f)) { bad = true; return; }
                 if (j.mode == 2) for (auto& v : f) v += 1.0f;
+                if (j.perm) { std::vector<float> tmp(f.size()); for (size_t w = 0; w < f.size(); w++) tmp[(w & 1) * 64 + (w >> 1)] = f[w]; f.swap(tmp); }       // the same dimension order as the rotated q / k rows
                 ggml_backend_tensor_set(j.t, f.data(), 0, f.size() * sizeof(float));
             }
             size_t d = ++done;
@@ -226,19 +239,27 @@ ggml_tensor* ropePairs(ggml_context* c, ggml_tensor* t /*[128,H,N]*/, ggml_tenso
     return ggml_reshape_3d(c, ggml_concat(c, o0, o1, 0), 128, H, N);
 }
 
+// a matrix product over a batched activation [in, n, b]: one big product over all b*n columns instead of b small ones (each of which would read the whole weight again)
+ggml_tensor* mmf(ggml_context* c, ggml_tensor* W, ggml_tensor* x) {
+    if (x->ne[2] == 1 && x->ne[3] == 1) return ggml_mul_mat(c, W, x);
+    ggml_tensor* x2 = ggml_reshape_2d(c, ggml_cont(c, x), x->ne[0], x->ne[1] * x->ne[2] * x->ne[3]);
+    return ggml_reshape_3d(c, ggml_mul_mat(c, W, x2), W->ne[1], x->ne[1], x->ne[2] * x->ne[3]);
+}
+
 // x: [D, N, B]. Self attention with per-head QK RMSNorm, optional RoPE, GQA and sigmoid gate.
 ggml_tensor* attention(ggml_context* c, const Krea2DiT::Blk& b, ggml_tensor* h, int heads, int kvheads,
                        ggml_tensor* cs, ggml_tensor* sn, ggml_tensor* mask = nullptr) {
     const int64_t N = h->ne[1], B = h->ne[2];
-    ggml_tensor* q = ggml_reshape_4d(c, ggml_mul_mat(c, b.wq, h), 128, heads, N, B);
-    ggml_tensor* k = ggml_reshape_4d(c, ggml_mul_mat(c, b.wk, h), 128, kvheads, N, B);
-    ggml_tensor* v = ggml_reshape_4d(c, ggml_mul_mat(c, b.wv, h), 128, kvheads, N, B);
-    ggml_tensor* g = ggml_sigmoid(c, ggml_mul_mat(c, b.gate, h));
+    ggml_tensor* q = ggml_reshape_4d(c, mmf(c, b.wq, h), 128, heads, N, B);
+    ggml_tensor* k = ggml_reshape_4d(c, mmf(c, b.wk, h), 128, kvheads, N, B);
+    ggml_tensor* v = ggml_reshape_4d(c, mmf(c, b.wv, h), 128, kvheads, N, B);
+    ggml_tensor* g = ggml_sigmoid(c, mmf(c, b.gate, h));
     q = ggml_mul(c, ggml_rms_norm(c, q, 1e-5f), b.qn);
     k = ggml_mul(c, ggml_rms_norm(c, k, 1e-5f), b.kn);
     if (cs) {
-        q = ggml_reshape_4d(c, ropePairs(c, ggml_reshape_3d(c, q, 128, heads, N), cs, sn), 128, heads, N, 1);
-        k = ggml_reshape_4d(c, ropePairs(c, ggml_reshape_3d(c, k, 128, kvheads, N), cs, sn), 128, kvheads, N, 1);
+        int sections[4] = {16, 24, 24, 0};                                   // cs = positions [4 N], sn = frequency factors [64] (q and k rows are stored in neox pair order, see load)
+        q = ggml_reshape_4d(c, ggml_rope_multi(c, ggml_reshape_3d(c, q, 128, heads, N), cs, sn, 128, sections, GGML_ROPE_TYPE_MROPE, 0, 1000.0f, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f), 128, heads, N, 1);
+        k = ggml_reshape_4d(c, ggml_rope_multi(c, ggml_reshape_3d(c, k, 128, kvheads, N), cs, sn, 128, sections, GGML_ROPE_TYPE_MROPE, 0, 1000.0f, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f), 128, kvheads, N, 1);
     }
     ggml_tensor* qp = ggml_permute(c, q, 0, 2, 1, 3);
     ggml_tensor* kp = ggml_cast(c, ggml_permute(c, k, 0, 2, 1, 3), GGML_TYPE_F16);
@@ -252,12 +273,12 @@ ggml_tensor* attention(ggml_context* c, const Krea2DiT::Blk& b, ggml_tensor* h, 
     ggml_tensor* a = noAttn ? ggml_cont(c, ggml_permute(c, qp, 0, 2, 1, 3)) : ggml_flash_attn_ext(c, qp, kp, vp, mask, 1.0f / std::sqrt(128.0f), 0.0f, 0.0f);
     a = ggml_reshape_3d(c, a, 128 * heads, N, B);
     a = ggml_mul(c, a, g);
-    return ggml_mul_mat(c, b.wo, a);
+    return mmf(c, b.wo, a);
 }
 
 ggml_tensor* swiglu(ggml_context* c, const Krea2DiT::Blk& b, ggml_tensor* h) {
-    ggml_tensor* m = ggml_mul(c, ggml_silu(c, ggml_mul_mat(c, b.mg, h)), ggml_mul_mat(c, b.mu, h));
-    return ggml_mul_mat(c, b.md, m);
+    ggml_tensor* m = ggml_mul(c, ggml_silu(c, mmf(c, b.mg, h)), mmf(c, b.mu, h));
+    return mmf(c, b.md, m);
 }
 
 // the same MLP over slices of tokens: the 16384-wide intermediates are only chunk x 16384 instead of N x 16384 (a big part of the GPU memory use)
@@ -278,6 +299,47 @@ ggml_tensor* swigluChunked(ggml_context* c, const Krea2DiT::Blk& b, ggml_tensor*
 ggml_tensor* fusionBlock(ggml_context* c, const Krea2DiT::Blk& b, ggml_tensor* x) {
     x = ggml_add(c, x, attention(c, b, ggml_mul(c, ggml_rms_norm(c, x, 1e-5f), b.pre), Krea2DiT::kTxtHeads, Krea2DiT::kTxtHeads, nullptr, nullptr));
     return ggml_add(c, x, swiglu(c, b, ggml_mul(c, ggml_rms_norm(c, x, 1e-5f), b.post)));
+}
+}  // namespace
+
+// ---- BAKERY_DIT_PROFILE=1: time of every graph node by kind (synchronises the GPU after each node: slow, for analysis only)
+namespace {
+struct DitProf {
+    std::map<std::string, std::pair<double, int>> t;
+    std::chrono::steady_clock::time_point last;
+    bool on = false;
+};
+DitProf g_prof;
+bool profCallback(ggml_tensor* n, bool ask, void*) {
+    if (ask) return true;
+    Compute& cm = Compute::get();
+    if (cm.gpu) ggml_backend_synchronize(cm.gpu);
+    const auto now = std::chrono::steady_clock::now();
+    const double dt = std::chrono::duration<double>(now - g_prof.last).count();
+    std::string key = ggml_op_name(n->op);
+    if (n->op == GGML_OP_MUL_MAT && n->src[0]) key += std::string(" ") + ggml_type_name(n->src[0]->type) + " " + std::to_string(n->src[0]->ne[0]) + "x" + std::to_string(n->src[0]->ne[1]) + " n=" + std::to_string(n->src[1]->ne[1]);
+    else if (n->op == GGML_OP_FLASH_ATTN_EXT) key += " q=" + std::to_string(n->src[0]->ne[0]) + "x" + std::to_string(n->src[0]->ne[1]) + "x" + std::to_string(n->src[0]->ne[2]) + "x" + std::to_string(n->src[0]->ne[3]);
+    else key += std::string(" ") + ggml_type_name(n->type) + " " + std::to_string(ggml_nelements(n) >> 20) + "M";
+    auto& e = g_prof.t[key]; e.first += dt; e.second++;
+    g_prof.last = std::chrono::steady_clock::now();
+    return true;
+}
+void profBegin(const char* what) {
+    static const bool want = getenv("BAKERY_DIT_PROFILE") != nullptr;
+    g_prof.on = want; if (!want) return;
+    g_prof.t.clear(); g_prof.last = std::chrono::steady_clock::now();
+    fprintf(stderr, "[profile] %s\n", what);
+    ggml_backend_sched_set_eval_callback(Compute::get().sched, profCallback, nullptr);
+}
+void profEnd() {
+    if (!g_prof.on) return;
+    ggml_backend_sched_set_eval_callback(Compute::get().sched, nullptr, nullptr);
+    std::vector<std::pair<double, std::string>> v; double total = 0;
+    for (auto& kv : g_prof.t) { v.push_back({kv.second.first, kv.first + "  x" + std::to_string(kv.second.second)}); total += kv.second.first; }
+    std::sort(v.rbegin(), v.rend());
+    fprintf(stderr, "[profile] total %.2f s\n", total);
+    for (size_t i = 0; i < v.size() && i < 14; i++) fprintf(stderr, "[profile] %7.3f s  %5.1f%%  %s\n", v[i].first, 100.0 * v[i].first / total, v[i].second.c_str());
+    g_prof.on = false;
 }
 }  // namespace
 
@@ -309,7 +371,9 @@ bool Krea2DiT::textTokens(const std::vector<float>& ctx, int seq, const std::vec
     ggml_backend_sched_reset(cm.sched);
     if (!ggml_backend_sched_alloc_graph(cm.sched, g)) { err = "cannot allocate the text graph"; ggml_free(c); return false; }
     ggml_backend_tensor_set(ctxIn, ctx.data(), 0, ctx.size() * sizeof(float));
-    if (ggml_backend_sched_graph_compute(cm.sched, g) != GGML_STATUS_SUCCESS) { err = "DiT text compute failed"; ggml_free(c); return false; }
+    profBegin("text path");
+    const bool okT = ggml_backend_sched_graph_compute(cm.sched, g) == GGML_STATUS_SUCCESS; profEnd();
+    if (!okT) { err = "DiT text compute failed"; ggml_free(c); return false; }
     std::vector<float> v((size_t)kDim * seq);
     ggml_backend_tensor_get(tx, v.data(), 0, v.size() * sizeof(float));
     ggml_backend_sched_reset(cm.sched);
@@ -343,8 +407,8 @@ bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sig
     ggml_tensor* ctxIn = nullptr;
     if (!txCached) { ctxIn = ggml_new_tensor_3d(c, GGML_TYPE_F32, kTxtDim, kTxtLayers, seq); ggml_set_input(ctxIn); }
     ggml_tensor* tIn = ggml_new_tensor_1d(c, GGML_TYPE_F32, 256); ggml_set_input(tIn);
-    ggml_tensor* cosIn = ggml_new_tensor_4d(c, GGML_TYPE_F32, 1, 64, 1, N); ggml_set_input(cosIn);
-    ggml_tensor* sinIn = ggml_new_tensor_4d(c, GGML_TYPE_F32, 1, 64, 1, N); ggml_set_input(sinIn);
+    ggml_tensor* posIn = ggml_new_tensor_1d(c, GGML_TYPE_I32, 4 * N); ggml_set_input(posIn);
+    ggml_tensor* ffIn = ggml_new_tensor_1d(c, GGML_TYPE_F32, 64); ggml_set_input(ffIn);
     // grouped-query attention kernel of ggml-cuda needs a mask and a key count that is a multiple of 256 (padded keys are masked out with -inf)
     static const bool wantMask = getenv("BAKERY_DIT_NOFAMASK") == nullptr;                     // on by default; the switch is for comparisons
     const bool useMask = wantMask && !getenv("BAKERY_DIT_NOATTN") && Compute::get().description().find("CUDA") != std::string::npos;
@@ -385,7 +449,7 @@ bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sig
         ggml_tensor *preS = chunk(0), *preH = chunk(1), *preG = chunk(2), *postS = chunk(3), *postH = chunk(4), *postG = chunk(5);
         ggml_tensor* h = ggml_mul(c, ggml_rms_norm(c, x, 1e-5f), b.pre);
         h = ggml_add(c, ggml_mul(c, h, ggml_scale_bias(c, preS, 1.0f, 1.0f)), preH);
-        x = ggml_add(c, x, ggml_mul(c, attention(c, b, ggml_reshape_3d(c, h, kDim, N, 1), kHeads, kKvHeads, cosIn, sinIn, faMask), preG));
+        x = ggml_add(c, x, ggml_mul(c, attention(c, b, ggml_reshape_3d(c, h, kDim, N, 1), kHeads, kKvHeads, posIn, ffIn, faMask), preG));
         h = ggml_mul(c, ggml_rms_norm(c, x, 1e-5f), b.post);
         h = ggml_add(c, ggml_mul(c, h, ggml_scale_bias(c, postS, 1.0f, 1.0f)), postH);
         x = ggml_add(c, x, ggml_mul(c, swigluChunked(c, b, h, mlpChunk), postG));
@@ -425,20 +489,14 @@ bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sig
         te[k] = (float)std::cos(a); te[128 + k] = (float)std::sin(a);
     }
     ggml_backend_tensor_set(tIn, te.data(), 0, te.size() * sizeof(float));
-    // RoPE tables: axes (0: always 0), (1: row), (2: col) with dims 32/48/48, theta 1000; text tokens at 0
-    std::vector<float> cs((size_t)N * 64, 1.0f), sn((size_t)N * 64, 0.0f);
-    const int axisDim[3] = {32, 48, 48};
-    for (int r = 0; r < hp; r++) for (int cc = 0; cc < wp; cc++) {
-        size_t tokIdx = (size_t)seq + r * wp + cc;
-        double pos[3] = {0.0, (double)r, (double)cc};
-        int pair = 0;
-        for (int ax = 0; ax < 3; ax++) for (int k = 0; k < axisDim[ax] / 2; k++, pair++) {
-            double om = 1.0 / std::pow(1000.0, (double)(2 * k) / axisDim[ax]);
-            cs[tokIdx * 64 + pair] = (float)std::cos(pos[ax] * om); sn[tokIdx * 64 + pair] = (float)std::sin(pos[ax] * om);
-        }
-    }
-    ggml_backend_tensor_set(cosIn, cs.data(), 0, cs.size() * sizeof(float));
-    ggml_backend_tensor_set(sinIn, sn.data(), 0, sn.size() * sizeof(float));
+    // RoPE: three position streams (0 always, image row, image column; text tokens at 0), dims 32/48/48 = 16/24/24 pairs, theta 1000. ggml_rope_multi counts the frequency
+    // exponent over all 64 pairs (1000^(-2p/128)), the model restarts it in every axis (1000^(-2k/48)): the frequency factors make up the difference.
+    std::vector<int32_t> pos4((size_t)4 * N, 0);
+    for (int r = 0; r < hp; r++) for (int cc = 0; cc < wp; cc++) { const size_t tokIdx = (size_t)seq + r * wp + cc; pos4[(size_t)N + tokIdx] = r; pos4[(size_t)2 * N + tokIdx] = cc; }
+    std::vector<float> ffv(64, 1.0f);
+    for (int p = 16; p < 64; p++) { const int k = p < 40 ? p - 16 : p - 40; ffv[p] = (float)std::pow(1000.0, -2.0 * p / 128.0 + 2.0 * k / 48.0); }
+    ggml_backend_tensor_set(posIn, pos4.data(), 0, pos4.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(ffIn, ffv.data(), 0, ffv.size() * sizeof(float));
     if (faMask) {
         static std::vector<uint16_t> maskData; static int64_t maskKey = -1;
         if (maskKey != N) {
@@ -449,7 +507,9 @@ bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sig
         ggml_backend_tensor_set(faMask, maskData.data(), 0, maskData.size() * 2);
     }
 
-    if (ggml_backend_sched_graph_compute(cm.sched, g) != GGML_STATUS_SUCCESS) { err = "DiT compute failed"; ggml_free(c); return false; }
+    profBegin("main step");
+    const bool okM = ggml_backend_sched_graph_compute(cm.sched, g) == GGML_STATUS_SUCCESS; profEnd();
+    if (!okM) { err = "DiT compute failed"; ggml_free(c); return false; }
 
     dump.clear();
     for (auto& tp : taps) {
