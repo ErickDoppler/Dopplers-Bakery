@@ -1,9 +1,11 @@
 #include "krea2/dit.h"
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <thread>
+
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -12,7 +14,40 @@
 
 static std::string P = "model.diffusion_model.";      // tensor-name prefix; some repacks (e.g. krea2_turbo_fp8) have none
 
+void Krea2DiT::releaseResident() {
+    if (bufDev_) ggml_backend_buffer_free(bufDev_);
+    if (ctxDev_) ggml_free(ctxDev_);
+    bufDev_ = nullptr; ctxDev_ = nullptr; devBlocks_.clear(); devN_ = 0;
+}
+
+int Krea2DiT::makeResident(size_t maxBytes) {
+    releaseResident();
+    Compute& cm = Compute::get();
+    if (!loaded() || blocks_.empty() || !cm.usingGpu() || cm.gpuIntegrated || getenv("BAKERY_DIT_NORESIDENT")) return 0;
+    auto mats = [](Blk& b) { return std::array<ggml_tensor**, 8>{&b.wq, &b.wk, &b.wv, &b.gate, &b.wo, &b.mg, &b.mu, &b.md}; };
+    Blk probe = blocks_[0]; size_t per = 0;
+    for (ggml_tensor** t : mats(probe)) per += ggml_nbytes(*t);
+    const int n = (int)std::min<size_t>(blocks_.size(), maxBytes / std::max<size_t>(per, 1));
+    if (n <= 0) return 0;
+    try {
+        ggml_init_params ip = {ggml_tensor_overhead() * (size_t)(n * 8 + 8), nullptr, true};
+        ctxDev_ = ggml_init(ip);
+        devBlocks_.assign(blocks_.begin(), blocks_.begin() + n);
+        std::vector<std::pair<ggml_tensor*, ggml_tensor*>> copies;                 // host tensor -> GPU tensor
+        for (auto& b : devBlocks_) for (ggml_tensor** t : mats(b)) {
+            ggml_tensor* d = ggml_new_tensor_2d(ctxDev_, (*t)->type, (*t)->ne[0], (*t)->ne[1]);
+            copies.push_back({*t, d}); *t = d;
+        }
+        bufDev_ = cm.allocDeviceWeights(ctxDev_);
+        if (!bufDev_) { releaseResident(); return 0; }
+        for (auto& cp : copies) ggml_backend_tensor_copy(cp.first, cp.second);
+        devN_ = n;
+    } catch (...) { releaseResident(); return 0; }                                 // the GPU refused: stream as before
+    return devN_;
+}
+
 void Krea2DiT::unload() {
+    releaseResident();
     if (buf_) ggml_backend_buffer_free(buf_);
     if (ctx_) ggml_free(ctx_);
     delete (StFile*)st_;
@@ -47,6 +82,7 @@ static void applyLora(const StFile& lora, const std::string& weightName, std::ve
 
 namespace {
 struct LoadJob { ggml_tensor* t; std::string name; int mode; };   // 0 fp8/bf16 matrix, 1 float vector, 2 float vector + 1
+
 }
 
 bool Krea2DiT::load(const std::string& path, int threads, std::string& err, const std::function<void(float)>& progress,
@@ -124,6 +160,30 @@ bool Krea2DiT::load(const std::string& path, int threads, std::string& err, cons
             if (j.mode == 0) {
                 if (t->dtype == "F8_E4M3") {
                     float scale = 1.0f; st->scalar(j.name.substr(0, j.name.size() - 6) + "weight_scale", scale);
+                    if (!useLora && j.t->type != GGML_TYPE_F16 && !getenv("BAKERY_DIT_SLOWLOAD")) {
+                        // one pass, one row at a time (decode + scale + quantize stay in the cache): the same numbers as the general path below, about twice as fast
+                        float lut[256]; for (int k = 0; k < 256; k++) lut[k] = fp8e4m3ToF32((uint8_t)k) * scale;
+                        const int64_t ne0 = j.t->ne[0], rows = j.t->ne[1];
+                        const size_t rb = ggml_row_size(j.t->type, ne0);
+                        f.resize((size_t)ne0); q.resize(ggml_nbytes(j.t));
+#if 1
+                        if (qt == GGML_TYPE_Q8_0 && fp8MatrixToQ8(t->data, lut, ne0, rows, q.data())) {
+                            ggml_backend_tensor_set(j.t, q.data(), 0, q.size());
+                            size_t d2 = ++done;
+                            if (progress && d2 % 32 == 0) progress((float)d2 / jobs.size());
+                            continue;
+                        }
+#endif
+                        for (int64_t r = 0; r < rows; r++) {
+                            const uint8_t* src = t->data + (size_t)r * ne0;
+                            for (int64_t k = 0; k < ne0; k++) f[k] = lut[src[k]];
+                            ggml_quantize_chunk(qt, f.data(), q.data() + (size_t)r * rb, 0, 1, ne0, nullptr);
+                        }
+                        ggml_backend_tensor_set(j.t, q.data(), 0, q.size());
+                        size_t d = ++done;
+                        if (progress && d % 32 == 0) progress((float)d / jobs.size());
+                        continue;
+                    }
                     st->toFloat(*t, f, scale);
                     if (useLora) applyLora(lora, "model.diffusion_model." + j.name.substr(P.size()), f, j.t->ne[0], j.t->ne[1], loraStrength, loraPatched);
                     q.resize(ggml_nbytes(j.t));
@@ -259,7 +319,7 @@ bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sig
     ggml_tensor* x = ggml_concat(c, tx, img, 1);                           // [6144, N]
 
     for (int i = 0; i < kBlocks; i++) {
-        const Blk& b = blocks_[i];
+        const Blk& b = i < devN_ ? devBlocks_[i] : blocks_[i];
         ggml_tensor* mod = ggml_add(c, tvec, b.mod);
         auto chunk = [&](int k) { return ggml_view_1d(c, mod, kDim, (size_t)k * kDim * sizeof(float)); };
         ggml_tensor *preS = chunk(0), *preH = chunk(1), *preG = chunk(2), *postS = chunk(3), *postH = chunk(4), *postG = chunk(5);
@@ -286,7 +346,11 @@ bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sig
     for (auto& tp : taps) ggml_build_forward_expand(g, tp.second);
     Compute& cm = Compute::get();
     ggml_backend_sched_reset(cm.sched);
-    if (!ggml_backend_sched_alloc_graph(cm.sched, g)) { err = "cannot allocate DiT graph"; ggml_free(c); return false; }
+    if (!ggml_backend_sched_alloc_graph(cm.sched, g)) {
+        ggml_free(c);
+        if (devN_ > 0) { releaseResident(); return forward(latent, H, W, sigma, ctx, seq, out, err); }       // the GPU copies took the room the graph needs: stream the weights again
+        err = "cannot allocate DiT graph"; return false;
+    }
 
     // inputs
     std::vector<float> tok((size_t)nImg * 64);

@@ -17,6 +17,10 @@ public:
     int quantBits = 8;                  // 8 (default) or 4 (low-memory mode); set before load()
     int mlpChunk = 0;                   // > 0: run the MLP of the image blocks in chunks of this many tokens (small GPU memory)
     bool loaded() const { return backend_ != nullptr; }
+    // The weights stay in host memory and the GPU reads them over PCIe on every step (about 0.7 s per step for the 13 GB of 8-bit weights). For the length of one job
+    // the first blocks' matrices can be copied into GPU memory (at most maxBytes); forward() falls back to the host copies by itself if the graph then does not fit.
+    int makeResident(size_t maxBytes);  // returns how many blocks are on the GPU
+    void releaseResident();
 
     // latent: 16 x H x W (channel-major, H and W multiples of 2 are padded by the caller),
     // ctx: seq x (12*2560) from Krea2TextEncoder. out: velocity, same layout as latent.
@@ -40,6 +44,7 @@ private:
     void* st_ = nullptr;
     int threads_ = 8;
     std::vector<Blk> blocks_, layerwise_, refiner_;
+    ggml_context* ctxDev_ = nullptr; ggml_backend_buffer* bufDev_ = nullptr; std::vector<Blk> devBlocks_; int devN_ = 0;     // GPU copies of the first devN_ blocks (see makeResident)
     ggml_tensor *firstW, *firstB, *tm0W, *tm0B, *tm2W, *tm2B, *tpW, *tpB;
     ggml_tensor *projector, *txtNorm, *txt1W, *txt1B, *txt3W, *txt3B;
     ggml_tensor *lastNorm, *lastLin, *lastW, *lastB;

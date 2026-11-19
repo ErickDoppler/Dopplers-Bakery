@@ -2,6 +2,8 @@
 #include <windows.h>
 #include <cmath>
 #include <cstring>
+#include <immintrin.h>
+#include "ggml.h"
 #include "util/json.h"
 #include "util/sys.h"
 
@@ -86,4 +88,49 @@ bool StFile::toFloat(const StTensor& t, std::vector<float>& out, float scale) co
     } else return false;
     if (scale != 1.0f) for (auto& v : out) v *= scale;
     return true;
+}
+
+// One row of FP8 weights (through a 256-entry float table that already holds the tensor scale) straight into Q8_0 blocks: same arithmetic and rounding
+// (half away from zero) as ggml's reference quantizer, 8 values at a time. n must be a multiple of 32.
+#if defined(__x86_64__) || defined(_M_X64)
+__attribute__((target("avx2")))
+static void fp8RowToQ8Avx2(const uint8_t* src, const float* lut, int64_t n, uint8_t* dst) {
+    const __m256 signBit = _mm256_set1_ps(-0.0f), half = _mm256_set1_ps(0.5f), one = _mm256_set1_ps(1.0f);
+    const __m256i fix = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
+    for (int64_t b = 0; b < n / 32; b++) {
+        __m256 v[4];
+        for (int k = 0; k < 4; k++) v[k] = _mm256_i32gather_ps(lut, _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(src + b * 32 + k * 8))), 4);
+        __m256 m = _mm256_max_ps(_mm256_max_ps(_mm256_andnot_ps(signBit, v[0]), _mm256_andnot_ps(signBit, v[1])), _mm256_max_ps(_mm256_andnot_ps(signBit, v[2]), _mm256_andnot_ps(signBit, v[3])));
+        __m128 m4 = _mm_max_ps(_mm256_extractf128_ps(m, 1), _mm256_castps256_ps128(m));
+        m4 = _mm_max_ps(m4, _mm_movehl_ps(m4, m4)); m4 = _mm_max_ss(m4, _mm_shuffle_ps(m4, m4, 1));
+        const float d = _mm_cvtss_f32(m4) / 127.0f, id = d ? 1.0f / d : 0.0f;
+        const ggml_fp16_t dh = ggml_fp32_to_fp16(d);
+        uint8_t* o = dst + b * 34; memcpy(o, &dh, 2);
+        const __m256 mul = _mm256_set1_ps(id);
+        __m256i q[4];
+        for (int k = 0; k < 4; k++) {
+            __m256 x = _mm256_mul_ps(v[k], mul);
+            __m256 t = _mm256_round_ps(x, _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC);
+            __m256 big = _mm256_cmp_ps(_mm256_andnot_ps(signBit, _mm256_sub_ps(x, t)), half, _CMP_GE_OQ);
+            t = _mm256_add_ps(t, _mm256_and_ps(big, _mm256_or_ps(one, _mm256_and_ps(x, signBit))));
+            q[k] = _mm256_cvtps_epi32(t);
+        }
+        __m256i a = _mm256_packs_epi32(q[0], q[1]), c = _mm256_packs_epi32(q[2], q[3]);
+        __m256i r = _mm256_permutevar8x32_epi32(_mm256_packs_epi16(a, c), fix);
+        _mm256_storeu_si256((__m256i*)(o + 2), r);
+    }
+}
+#endif
+
+// A whole FP8 matrix [rows][cols] into Q8_0 (34 bytes per 32 values, rows back to back). false: no AVX2 or cols is not a multiple of 32 (the caller converts the slow way).
+bool fp8MatrixToQ8(const uint8_t* src, const float* lut, int64_t cols, int64_t rows, uint8_t* dst) {
+#if defined(__x86_64__) || defined(_M_X64)
+    static const bool avx2 = __builtin_cpu_supports("avx2") && !getenv("BAKERY_DIT_NOAVX");
+    if (!avx2 || cols % 32) return false;
+    const size_t rb = (size_t)(cols / 32) * 34;
+    for (int64_t r = 0; r < rows; r++) fp8RowToQ8Avx2(src + (size_t)r * cols, lut, cols, dst + (size_t)r * rb);
+    return true;
+#else
+    (void)src; (void)lut; (void)cols; (void)rows; (void)dst; return false;
+#endif
 }

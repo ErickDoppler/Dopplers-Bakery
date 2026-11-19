@@ -135,8 +135,10 @@ bool runImage(const Job& job, JobCtl& ctl, std::string& err) {
     if (!g.te.loaded() || g.tePath != tePath) {
         ctl.progress(0.00f, "loading text encoder");
         if (!ctl.checkpoint()) { err = "cancelled"; return false; }
+        const auto tl = std::chrono::steady_clock::now();
         if (!g.te.load(tePath, threads, err)) return false;
         g.tePath = tePath;
+        logLine("image: text encoder loaded in " + std::to_string((int)(secs(tl) * 10) / 10.0).substr(0, 4) + " s");
     }
     char key[64]; snprintf(key, sizeof key, "|%.4f", loraStrength);
     std::string ditKey = ditPath + "|" + loraPath + key;
@@ -144,8 +146,10 @@ bool runImage(const Job& job, JobCtl& ctl, std::string& err) {
         ctl.progress(0.03f, loraPath.empty() ? "loading diffusion model" : "loading diffusion model + LoRA");
         if (!ctl.checkpoint()) { err = "cancelled"; return false; }
         g.dit.unload();
+        const auto tl = std::chrono::steady_clock::now();
         if (!g.dit.load(ditPath, threads, err, [&](float f) { ctl.progress(0.03f + 0.10f * f, "loading diffusion model"); }, loraPath, loraStrength)) return false;
         g.ditKey = ditKey;
+        logLine("image: diffusion model loaded in " + std::to_string((int)(secs(tl) * 10) / 10.0).substr(0, 4) + " s");
     }
     if (!g.vae.loaded() || g.vaePath != vaePath) {
         ctl.progress(0.13f, "loading VAE");
@@ -173,6 +177,17 @@ bool runImage(const Job& job, JobCtl& ctl, std::string& err) {
 
     // ---- sampling in latent space (DiT needs even latent sizes; extra border is cropped afterwards)
     const int Hp = latH + (latH & 1), Wp = latW + (latW & 1);
+    // the first blocks' weights go into GPU memory for this job (they would be read over PCIe on every step); released when the job ends so other tabs get the memory
+    struct Resident { Krea2DiT& d; ~Resident() { d.releaseResident(); } } resident{g.dit};
+    if (Compute::get().usingGpu() && !smallGpu) {
+        const size_t freeMB = Compute::get().gpuFreeMB(), tokens = (size_t)(Hp / 2) * (Wp / 2);
+        const size_t reserveMB = 3500 + (size_t)(tokens * 6 / 10);            // activations and the VAE decode that follows
+        if (freeMB > reserveMB + 600) {
+            const auto tr = std::chrono::steady_clock::now();
+            const int n = g.dit.makeResident((freeMB - reserveMB) << 20);
+            if (n > 0) logLine("image: " + std::to_string(n) + " of 28 blocks resident on the GPU (" + std::to_string((int)(secs(tr) * 10) / 10.0).substr(0, 3) + " s)");
+        }
+    }
     std::vector<float> x((size_t)16 * Hp * Wp);
     k2::Rng rng((unsigned long long)seed);
     rng.normal(x);

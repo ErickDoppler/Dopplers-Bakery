@@ -78,6 +78,16 @@ bool Krea2TextEncoder::load(const std::string& path, int threads, std::string& e
             const StTensor* t = st->find(j.name);
             float scale = 1.0f;
             if (j.fp8) st->scalar(j.name.substr(0, j.name.size() - 6) + "weight_scale", scale);
+            if (j.fp8 && t->dtype == "F8_E4M3" && qt == GGML_TYPE_Q8_0) {          // AVX2: decode + scale + quantize in one pass (same numbers as the general path)
+                float lut[256]; for (int k = 0; k < 256; k++) lut[k] = fp8e4m3ToF32((uint8_t)k) * scale;
+                q.resize(ggml_nbytes(j.t));
+                if (fp8MatrixToQ8(t->data, lut, j.t->ne[0], j.t->ne[1], q.data())) {
+                    ggml_backend_tensor_set(j.t, q.data(), 0, q.size());
+                    size_t d = ++done;
+                    if (progress && d % 16 == 0) progress((float)d / jobs.size());
+                    continue;
+                }
+            }
             if (!st->toFloat(*t, f, scale)) { bad = true; return; }
             if (j.fp8) {
                 int64_t cols = j.t->ne[0], rows = j.t->ne[1];

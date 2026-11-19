@@ -33,3 +33,4 @@ private:
 float bf16ToF32(uint16_t v);
 float f16ToF32(uint16_t v);
 float fp8e4m3ToF32(uint8_t v);       // OCP E4M3FN (no inf, 0x7f/0xff = NaN)
+bool fp8MatrixToQ8(const uint8_t* src, const float* lut, int64_t cols, int64_t rows, uint8_t* dst);   // AVX2: FP8 matrix (lut = value table times the tensor scale) straight into Q8_0; false = use the slow path
