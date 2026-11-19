@@ -12,7 +12,7 @@ bool expandVideoPromptForTest(const std::string& ggufModel, const std::string& p
 bool runVideo(const Job& job, JobCtl& ctl, std::string& err);   // video_engine.cpp (LTX-2.3 port, in progress)
 void releaseVideoModels();      // video_engine.cpp: free the LTX weights (tens of GB of RAM)
 void releaseImageModels();      // image_engine.cpp: free the image weights (about 20 GB of RAM)
-size_t freeRamMB();             // memory.cpp: free physical memory
+size_t freeRamMB(); size_t totalRamMB();     // memory.cpp
 void prepareForJob(Kind k, const Json& params);   // memory.cpp: called by the queue before every job: frees other tabs' big models when RAM is short
 size_t imageModelsMB(); size_t audioModelsMB(); size_t ttsModelsMB(); size_t llmModelMB(); size_t videoModelsMB();   // what each engine keeps loaded (0 = nothing)
 void releaseAudioModels(); void releaseTtsModels();

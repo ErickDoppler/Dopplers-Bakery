@@ -1,16 +1,12 @@
 // Memory policy between tabs. Every engine keeps its models loaded after a job (reloading takes seconds to minutes), but together they do not fit:
-// the video models alone are about 80 GB, the image models 18 GB, audio 10 GB, speech 4 GB, and a chat model sits in video memory. Before a job starts,
-// the cached models of the OTHER tabs that are bigger than 4 GB are freed when RAM would run short (largest first); a chat model over 4 GB also leaves
-// video memory before any other tab's job. Small models stay: they cost nothing to keep.
-#include <algorithm>
-#include <windows.h>
+// the video models alone are about 80 GB, the image models 18 GB, audio 10 GB, speech 4 GB. The limits depend on the RAM of the PC (see tierFor).
 #include "backends/engines.h"
 #include "gpu/compute.h"
 #include "util/crashlog.h"
 #include "util/sys.h"
 
 namespace {
-constexpr size_t kBigMB = 4096;                       // models up to this size are never unloaded for a transition
+
 struct Holder { Kind kind; const char* name; size_t (*mb)(); void (*release)(); };
 const Holder kHolders[] = {
     {Kind::Video, "video", videoModelsMB, releaseVideoModels},
@@ -34,22 +30,39 @@ size_t needMB(Kind k, const Json& p) {
 }
 }  // namespace
 
-size_t freeRamMB() { MEMORYSTATUSEX ms = {sizeof ms}; GlobalMemoryStatusEx(&ms); return (size_t)(ms.ullAvailPhys >> 20); }
+size_t freeRamMB() {
+    if (const char* e = getenv("BAKERY_MEM_FREE_MB")) return (size_t)atoll(e);                 // test hook
+    MEMORYSTATUSEX ms = {sizeof ms}; GlobalMemoryStatusEx(&ms); return (size_t)(ms.ullAvailPhys >> 20);
+}
+size_t totalRamMB() {
+    if (const char* e = getenv("BAKERY_MEM_TOTAL_MB")) return (size_t)atoll(e);                // test hook
+    MEMORYSTATUSEX ms = {sizeof ms}; GlobalMemoryStatusEx(&ms); return (size_t)(ms.ullTotalPhys >> 20);
+}
+
+// The rule, by the amount of RAM in the PC. On a job of another tab, cached models of the other tabs that are bigger than `bigMB` are freed, and when free RAM
+// is below `floorMB` (counting what this job still has to load) the others are freed, biggest first, until it is not.
+struct RamTier { size_t bigMB, floorMB; };
+RamTier tierFor(size_t totalMB) {
+    if (totalMB <= 24 * 1024)  return {4608, 4096};              // 16 GB:  bigger than 4.5 GB, or free below 4 GB
+    if (totalMB <= 48 * 1024)  return {8192, 8192};              // 32 GB:  bigger than 8 GB,   or free below 8 GB
+    if (totalMB <= 96 * 1024)  return {20480, 16384};            // 64 GB:  bigger than 20 GB,  or free below 16 GB
+    return {32768, 16384};                                       // 128 GB: bigger than 32 GB,  or free below 16 GB
+}
 
 void prepareForJob(Kind k, const Json& params) {
-    MEMORYSTATUSEX ms = {sizeof ms}; GlobalMemoryStatusEx(&ms);
-    size_t headroom = std::max<size_t>(12000, (size_t)(ms.ullTotalPhys >> 20) / 10);          // the system, the activations and the file cache
-    if (const char* e = getenv("BAKERY_MEM_HEADROOM_MB")) headroom = (size_t)atoll(e);       // test hook: pretend RAM is scarce
+    const RamTier t = tierFor(totalRamMB());
+    auto release = [&](const Holder& h, size_t mb, const char* why) {
+        logLine(std::string("memory: ") + h.name + " models released (" + std::to_string(mb >> 10) + " GB, " + why + ") for the " + kindKey(k) + " job; free RAM " + std::to_string(freeRamMB() >> 10) + " GB");
+        h.release();
+    };
+    // 1) every other tab's models over the size limit go (a job of the same tab keeps its own: reloading them is the slow part)
+    for (auto& h : kHolders) { if (h.kind == k) continue; const size_t m = h.mb(); if (m > t.bigMB) release(h, m, "bigger than the limit for this PC"); }
+    // 2) free RAM below the floor (with what this job still has to load): the rest of the other tabs' models, biggest first
     const size_t need = needMB(k, params);
-    // 1) RAM: free the biggest other model sets until the job fits
-    for (;;) {
-        if (need == 0 || freeRamMB() >= need + headroom) break;
+    while (freeRamMB() < t.floorMB + need) {
         const Holder* big = nullptr; size_t bigMB = 0;
-        for (auto& h : kHolders) { if (h.kind == k) continue; const size_t m = h.mb(); if (m > kBigMB && m > bigMB) { big = &h; bigMB = m; } }
+        for (auto& h : kHolders) { if (h.kind == k) continue; const size_t m = h.mb(); if (m > bigMB) { big = &h; bigMB = m; } }
         if (!big) break;
-        logLine(std::string("memory: ") + big->name + " models released (" + std::to_string(bigMB >> 10) + " GB) to make room for the " + kindKey(k) + " job; free RAM was " + std::to_string(freeRamMB() >> 10) + " GB");
-        big->release();
+        release(*big, bigMB, "free RAM too low");
     }
-    // 2) video memory: a big chat model keeps its layers on the GPU, which the other tabs need
-    if (k != Kind::LLM && llmModelMB() > kBigMB) { logLine("memory: chat model released (it was in video memory)"); releaseLLM(); }
 }
