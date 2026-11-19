@@ -23,7 +23,7 @@ CHAT IN THE BROWSER
 Needs: Windows 10/11 64-bit, a CPU with AVX2 (2013 or newer). A GPU with up-to-date Vulkan drivers
 (NVIDIA, AMD or Intel) is used automatically; without one it runs on the CPU, much slower.
 Rough VRAM: images 8 GB+, audio 8 GB+, speech 6 GB+, video 12 GB; the chat model is small.
-The Text/Image to video tab needs another 42 GB of models (LTX-2.3) and keeps about 25 GB of weights in RAM after its first job (64 GB+ RAM recommended).
+The Video tab needs another 42 GB of models (LTX-2.3) and about 80 GB of RAM while it works (128 GB recommended); other tabs' models are freed first.
 On first launch the app offers all models in one list: press "Download selected" and everything is set up by itself.
 
 Command line:  DopplersBakery.exe chat --say "make me a picture of a fox"
@@ -35,5 +35,5 @@ Krea 2 models are under the Krea 2 license; check it before sharing generated im
 License: free for personal use; enterprise use needs a paid license (US$100 per workstation). See LICENSE.txt.
 
 Images above about 1264 px: the built-in Vulkan backend cannot render them correctly (they are reduced). For larger images open a tab's
-"Model settings" and press "Download CUDA libraries" (NVIDIA GPU, about 0.45 GB), restart, then pick Backend = CUDA on the Text to image tab.
+"Model settings" and press "Download CUDA libraries" (NVIDIA GPU, about 0.45 GB), restart, then pick Backend = CUDA on the Image tab.
 
