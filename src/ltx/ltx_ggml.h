@@ -118,16 +118,25 @@ inline bool loadConv(WeightSet& W, const LtxWeights& ck, const std::string& p, C
     std::vector<int64_t> sh; std::vector<float> d;
     if (!ck.shapeOf(p + "weight", sh) || !ck.loadF32(p + "weight", d, err)) { if (err.empty()) err = "missing " + p + "weight"; return false; }
     const int oc = (int)sh[0], ic = (int)sh[1];
-    cw.oc = oc; cw.ic = ic;
+    const int oc2 = (oc + 7) / 8 * 8;                       // output channels padded to a multiple of 8 with zero rows: the CUDA matrix product breaks on odd counts (the encoder's 129)
+    cw.oc = oc2; cw.ic = ic;
     for (int dt = 0; dt < 3; dt++) {
-        std::vector<float> tap((size_t)oc * ic * 9);
+        std::vector<float> tap((size_t)oc2 * ic * 9, 0.f);
         for (int o = 0; o < oc; o++) for (int i = 0; i < ic; i++) for (int k = 0; k < 9; k++) tap[((size_t)o * ic + i) * 9 + k] = d[(((size_t)o * ic + i) * 3 + dt) * 9 + k];
-        cw.w[dt] = ggml_new_tensor_4d(W.ctx, GGML_TYPE_F16, 3, 3, ic, oc);
+        cw.w[dt] = ggml_new_tensor_4d(W.ctx, GGML_TYPE_F16, 3, 3, ic, oc2);
         W.items.push_back({cw.w[dt], std::move(tap), true});
     }
-    cw.b = W.vec(ck, p + "bias", err);
-    return cw.b != nullptr;
+    std::vector<float> b;
+    if (!ck.loadF32Raw(p + "bias", b, err)) { if (err.empty()) err = "missing " + p + "bias"; return false; }
+    b.resize((size_t)oc2, 0.f);
+    cw.b = ggml_new_tensor_1d(W.ctx, GGML_TYPE_F32, oc2);
+    W.items.push_back({cw.b, std::move(b), false});
+    return true;
 }
+
+// Sums of thousands of products overflow the half-precision accumulator CUDA uses by default (invalid numbers in the video encoder): when set,
+// every convolution made by conv3 accumulates in single precision.
+inline bool& convF32() { static bool v = false; return v; }
 
 // x [W,H,C,T]; the time axis is padded by replicating the first / last frame (padF / padB frames), then three 2D convs are summed
 inline TT conv3(ggml_context* c, const ConvW& cw, TT x, int padF, int padB, bool zeroPad = false) {
@@ -146,6 +155,7 @@ inline TT conv3(ggml_context* c, const ConvW& cw, TT x, int padF, int padB, bool
         for (int dt = 0; dt < 3; dt++) {
             TT s = ggml_cont(c, ggml_view_4d(c, xp, W, H, C, n, xp->nb[1], xp->nb[2], xp->nb[3], (size_t)(t0 + dt) * xp->nb[3]));
             TT y = ggml_conv_2d(c, cw.w[dt], s, 1, 1, 1, 1, 1, 1);
+            if (convF32()) { TT mn = y; for (int k = 0; k < 8 && mn && mn->op != GGML_OP_MUL_MAT; k++) mn = mn->src[0]; if (mn && mn->op == GGML_OP_MUL_MAT) ggml_mul_mat_set_prec(mn, GGML_PREC_F32); }
             part = part ? ggml_add(c, part, y) : y;
         }
         acc = acc ? ggml_concat(c, acc, part, 3) : part;
@@ -160,5 +170,6 @@ inline TT pixelNorm(ggml_context* c, TT x) {          // over the channel axis (
 }
 
 }  // namespace ltxg
+
 
 

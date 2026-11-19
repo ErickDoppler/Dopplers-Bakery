@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <random>
+#include "backends/engines.h"
 #include "ltx/ltx_audio.h"
 #include "ltx/ltx_text.h"
 #include "ltx/ltx_upscaler.h"
@@ -78,6 +79,8 @@ bool encodeStart(const LtxVae& vae, const ImageRgb& img, int lh, int lw, std::ve
     for (int y = 0; y < v.H; y++) for (int x = 0; x < v.W; x++) for (int c = 0; c < 3; c++) v.at(0, c, y, x) = px[((size_t)y * v.W + x) * 3 + c] * 2.f - 1.f;
     Vol lat; if (!const_cast<LtxVae&>(vae).encode(v, lat, err)) return false;
     frame = lat.d;                                           // [1][128][h][w]
+    if (!finiteAll(frame)) { err = "the start image could not be encoded (invalid numbers in its latent)"; return false; }
+    if (getenv("LTX_DEBUG")) { float lo = 1e9f, hi = -1e9f; for (float v : frame) { lo = std::min(lo, v); hi = std::max(hi, v); } fprintf(stderr, "start image latent: min %.3f max %.3f\n", lo, hi); }
     return true;
 }
 }  // namespace
@@ -181,6 +184,9 @@ int runLtxGenTest(const std::vector<std::string>& a) {
     if (a.size() > 8) p.ditBlocks = atoi(a[8].c_str());
     if (a.size() > 9) p.upscale = atoi(a[9].c_str()) != 0;
     sys::makeDirs(a[0]);
+    if (const char* gg = getenv("LTX_LLM")) {                      // test hook: expand the prompt with the chat model first, like the app does
+        std::string ex; if (expandVideoPromptForTest(gg, p.prompt, ex)) { fprintf(stderr, "prompt expanded (%zu chars)\n", ex.size()); p.prompt = ex; } else fprintf(stderr, "prompt NOT expanded\n");
+    }
     LtxModels models; if (!models.open(f, p.loraStrength, err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
     LtxResult r; auto t0 = std::chrono::steady_clock::now();
     float last = -1;
@@ -222,5 +228,6 @@ int runMp4FrameTest(const std::vector<std::string>& a) {
     printf("%dx%d, %.2f s, audio stream: %s\n", w, h, secs, aud ? "yes" : "no");
     return 0;
 }
+
 
 

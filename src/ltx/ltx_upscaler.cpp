@@ -1,4 +1,4 @@
-#include "ltx/ltx_upscaler.h"
+﻿#include "ltx/ltx_upscaler.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -42,6 +42,7 @@ template <class F> bool runVol(const Vol& in, Vol& out, F build, std::string& er
 
 bool LtxUpscaler::run(const Vol& latent, Vol& out, std::string& err) {
     if (!Compute::get().init(0, err)) return false;
+    struct F32Scope { F32Scope() { convF32() = true; } ~F32Scope() { convF32() = false; } } f32scope;      // 1024-channel convolutions: single-precision accumulation (half precision overflows on CUDA)
     const LtxWeights& m = *model;
     std::vector<float> mean, stdv;
     if (!ckpt->loadF32("vae.per_channel_statistics.mean-of-means", mean, err) || !ckpt->loadF32("vae.per_channel_statistics.std-of-means", stdv, err)) return false;
@@ -97,3 +98,4 @@ int runLtxUpscalerTest(const std::vector<std::string>& a) {
     printf("upscaler n=%zu max|diff|=%.5g (max|ref|=%.4g) cosine=%.6f\n", y.size(), md, mr, dot / (std::sqrt(na * nb) + 1e-30));
     return 0;
 }
+

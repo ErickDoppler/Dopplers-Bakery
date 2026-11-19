@@ -108,10 +108,12 @@ bool LtxVae::encode(const Vol& image, Vol& latent, std::string& err) {
     if (image.T != 1 || image.C != 3 || image.H % 32 || image.W % 32) { err = "the encoder takes one RGB frame whose sides are multiples of 32"; return false; }
     std::vector<float> mean, stdv;
     if (!ckpt->loadF32("vae.per_channel_statistics.mean-of-means", mean, err) || !ckpt->loadF32("vae.per_channel_statistics.std-of-means", stdv, err)) return false;
+    struct F32Scope { F32Scope() { convF32() = true; } ~F32Scope() { convF32() = false; } } f32scope;     // the encoder has 1024-channel convolutions: accumulate in single precision
     const int F = 2, B = 0;                                           // causal encoder: two replicated frames in front, none behind
     Vol x = patchify(image, 4);
     {   WeightSet W; ConvW cw; if (!loadConv(W, *ckpt, "vae.encoder.conv_in.conv.", cw, err) || !W.upload(err)) return false;
         Vol y; if (!runVol(x, y, 0, 0, [&](ggml_context* c, TT in) { return conv3(c, cw, in, F, B); }, err)) return false; x = std::move(y);
+        if (getenv("LTX_DEBUG")) { size_t bad = 0; for (float v : x.d) if (!std::isfinite(v)) bad++; fprintf(stderr, "  encoder %s: %dx%dx%dx%d, %zu invalid of %zu\n", "conv_in", x.T, x.C, x.H, x.W, bad, x.d.size()); }
     }
     struct Dn { int p1, p2, p3, out; };
     const Dn dn[9] = {{0,0,0,0}, {1,2,2,256}, {0,0,0,0}, {2,1,1,512}, {0,0,0,0}, {2,2,2,1024}, {0,0,0,0}, {2,2,2,1024}, {0,0,0,0}};
@@ -123,6 +125,7 @@ bool LtxVae::encode(const Vol& image, Vol& latent, std::string& err) {
             for (size_t k = 0; k < rs.size(); k++) if (!loadRes(W, *ckpt, p + "res_blocks." + std::to_string(k) + ".", rs[k], err)) return false;
             if (!W.upload(err)) return false;
             Vol y; if (!runVol(x, y, 0, 0, [&](ggml_context* c, TT in) { TT h = in; for (auto& r : rs) h = resBlock(c, r, h, F, B); return h; }, err)) return false; x = std::move(y);
+        if (getenv("LTX_DEBUG")) { size_t bad = 0; for (float v : x.d) if (!std::isfinite(v)) bad++; fprintf(stderr, "  encoder %s: %dx%dx%dx%d, %zu invalid of %zu\n", ("res group " + std::to_string(i)).c_str(), x.T, x.C, x.H, x.W, bad, x.d.size()); }
         } else {
             // SpaceToDepthDownsample: first frame duplicated for a time stride, conv, shuffle, plus a group-mean skip connection
             Vol xin = x;
@@ -139,6 +142,7 @@ bool LtxVae::encode(const Vol& image, Vol& latent, std::string& err) {
             y = spaceToDepth(y, dn[i].p1, dn[i].p2, dn[i].p3);
             for (size_t k = 0; k < y.d.size(); k++) y.d[k] += skip.d[k];
             x = std::move(y);
+        if (getenv("LTX_DEBUG")) { size_t bad = 0; for (float v : x.d) if (!std::isfinite(v)) bad++; fprintf(stderr, "  encoder %s: %dx%dx%dx%d, %zu invalid of %zu\n", ("downsample " + std::to_string(i)).c_str(), x.T, x.C, x.H, x.W, bad, x.d.size()); }
         }
     }
     {   WeightSet W; ConvW cw; if (!loadConv(W, *ckpt, "vae.encoder.conv_out.conv.", cw, err) || !W.upload(err)) return false;
@@ -181,4 +185,5 @@ int runLtxVaeTest(const std::vector<std::string>& a) {
     }
     return 0;
 }
+
 

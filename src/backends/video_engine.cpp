@@ -159,3 +159,16 @@ int runVideoExpandTest(const std::vector<std::string>& a) {
 
 
 
+
+bool expandVideoPromptForTest(const std::string& ggufModel, const std::string& prompt, std::string& out) {
+    struct Quiet : JobCtl {
+        void progress(float, const std::string&) override {}
+        void addOutput(const std::string&) override {}
+        void setText(const std::string&) override {}
+        bool checkpoint() override { return true; }
+    } ctl;
+    Json p = Json::object(); p["llm"] = ggufModel; p["seed"] = 1;
+    Job job; job.id = 0; std::string note;
+    return expandVideoPrompt(p, job, prompt, 4.0, ctl, out, note) == 0;
+}
+
