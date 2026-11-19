@@ -78,7 +78,7 @@ void CudaInstaller::start() {
     const std::string base = std::string("https://github.com/ggml-org/llama.cpp/releases/download/") + kTag + "/";
     CatEntry e; e.id = "cuda-libs"; e.label = "CUDA libraries";
     e.files.push_back({base + "llama-" + kTag + "-bin-win-cuda-13.5-x64.zip", "@exe/cuda_download/llama-cuda.zip", 171031017ull});
-    e.files.push_back({base + "cudart-llama-bin-win-cuda-13.5-x64.zip", "@exe/cuda_download/cudart.zip", 278821062ull});
+    e.files.push_back({base + "cudart-llama-bin-win-cuda-13.5-x64.zip", "@exe/cuda_download/cudart.zip", 426314199ull});
     dl_.start({e});
     th_ = std::thread([this] {
         dl_.join();

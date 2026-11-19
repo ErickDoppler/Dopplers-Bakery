@@ -8,7 +8,7 @@
 #include "core/download.h"
 
 bool cudaLibsInstalled();                // ggml-cuda.dll, cudart64_13.dll, cublas64_13.dll, cublasLt64_13.dll next to the exe
-const unsigned long long kCudaLibsBytes = 449852079ull;     // size of the two archives
+const unsigned long long kCudaLibsBytes = 597345216ull;     // size of the two archives
 
 class CudaInstaller {
 public:
