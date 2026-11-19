@@ -227,7 +227,7 @@ ggml_tensor* ropePairs(ggml_context* c, ggml_tensor* t /*[128,H,N]*/, ggml_tenso
 
 // x: [D, N, B]. Self attention with per-head QK RMSNorm, optional RoPE, GQA and sigmoid gate.
 ggml_tensor* attention(ggml_context* c, const Krea2DiT::Blk& b, ggml_tensor* h, int heads, int kvheads,
-                       ggml_tensor* cs, ggml_tensor* sn) {
+                       ggml_tensor* cs, ggml_tensor* sn, ggml_tensor* mask = nullptr) {
     const int64_t N = h->ne[1], B = h->ne[2];
     ggml_tensor* q = ggml_reshape_4d(c, ggml_mul_mat(c, b.wq, h), 128, heads, N, B);
     ggml_tensor* k = ggml_reshape_4d(c, ggml_mul_mat(c, b.wk, h), 128, kvheads, N, B);
@@ -242,7 +242,13 @@ ggml_tensor* attention(ggml_context* c, const Krea2DiT::Blk& b, ggml_tensor* h, 
     ggml_tensor* qp = ggml_permute(c, q, 0, 2, 1, 3);
     ggml_tensor* kp = ggml_cast(c, ggml_permute(c, k, 0, 2, 1, 3), GGML_TYPE_F16);
     ggml_tensor* vp = ggml_cast(c, ggml_permute(c, v, 0, 2, 1, 3), GGML_TYPE_F16);
-    ggml_tensor* a = ggml_flash_attn_ext(c, qp, kp, vp, nullptr, 1.0f / std::sqrt(128.0f), 0.0f, 0.0f);
+    if (mask) {                                                              // CUDA: a mask (and keys padded to a multiple of 256) lets ggml use its grouped-query attention kernel (4 query heads per key head)
+        const int64_t padn = mask->ne[0] - N;
+        auto padKV = [&](ggml_tensor* t) { ggml_tensor* p = ggml_cont(c, ggml_permute(c, t, 0, 2, 1, 3)); if (padn > 0) p = ggml_pad(c, p, 0, (int)padn, 0, 0); return ggml_cast(c, p, GGML_TYPE_F16); };
+        kp = padKV(k); vp = padKV(v);
+    }
+    static const bool noAttn = getenv("BAKERY_DIT_NOATTN") != nullptr;                   // timing experiment only: skips attention (the picture is garbage)
+    ggml_tensor* a = noAttn ? ggml_cont(c, ggml_permute(c, qp, 0, 2, 1, 3)) : ggml_flash_attn_ext(c, qp, kp, vp, mask, 1.0f / std::sqrt(128.0f), 0.0f, 0.0f);
     a = ggml_reshape_3d(c, a, 128 * heads, N, B);
     a = ggml_mul(c, a, g);
     return ggml_mul_mat(c, b.wo, a);
@@ -295,6 +301,12 @@ bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sig
     ggml_tensor* tIn = ggml_new_tensor_1d(c, GGML_TYPE_F32, 256); ggml_set_input(tIn);
     ggml_tensor* cosIn = ggml_new_tensor_4d(c, GGML_TYPE_F32, 1, 64, 1, N); ggml_set_input(cosIn);
     ggml_tensor* sinIn = ggml_new_tensor_4d(c, GGML_TYPE_F32, 1, 64, 1, N); ggml_set_input(sinIn);
+    // grouped-query attention kernel of ggml-cuda needs a mask and a key count that is a multiple of 256 (padded keys are masked out with -inf)
+    static const bool wantMask = getenv("BAKERY_DIT_NOFAMASK") == nullptr;                     // on by default; the switch is for comparisons
+    const bool useMask = wantMask && Compute::get().description().find("CUDA") != std::string::npos;
+    const int64_t nKvPad = (N + 255) / 256 * 256, nQPad = (N + 63) / 64 * 64;
+    ggml_tensor* faMask = nullptr;
+    if (useMask) { faMask = ggml_new_tensor_2d(c, GGML_TYPE_F16, nKvPad, nQPad); ggml_set_input(faMask); }
 
     // timestep -> t (6144) and per-block modulation vector (6*6144)
     ggml_tensor* t = addBias(c, ggml_mul_mat(c, tm0W, tIn), tm0B);
@@ -325,7 +337,7 @@ bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sig
         ggml_tensor *preS = chunk(0), *preH = chunk(1), *preG = chunk(2), *postS = chunk(3), *postH = chunk(4), *postG = chunk(5);
         ggml_tensor* h = ggml_mul(c, ggml_rms_norm(c, x, 1e-5f), b.pre);
         h = ggml_add(c, ggml_mul(c, h, ggml_scale_bias(c, preS, 1.0f, 1.0f)), preH);
-        x = ggml_add(c, x, ggml_mul(c, attention(c, b, ggml_reshape_3d(c, h, kDim, N, 1), kHeads, kKvHeads, cosIn, sinIn), preG));
+        x = ggml_add(c, x, ggml_mul(c, attention(c, b, ggml_reshape_3d(c, h, kDim, N, 1), kHeads, kKvHeads, cosIn, sinIn, faMask), preG));
         h = ggml_mul(c, ggml_rms_norm(c, x, 1e-5f), b.post);
         h = ggml_add(c, ggml_mul(c, h, ggml_scale_bias(c, postS, 1.0f, 1.0f)), postH);
         x = ggml_add(c, x, ggml_mul(c, swigluChunked(c, b, h, mlpChunk), postG));
@@ -378,6 +390,15 @@ bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sig
     }
     ggml_backend_tensor_set(cosIn, cs.data(), 0, cs.size() * sizeof(float));
     ggml_backend_tensor_set(sinIn, sn.data(), 0, sn.size() * sizeof(float));
+    if (faMask) {
+        static std::vector<uint16_t> maskData; static int64_t maskKey = -1;
+        if (maskKey != N) {
+            maskData.assign((size_t)nKvPad * nQPad, 0);
+            for (int64_t r = 0; r < nQPad; r++) for (int64_t k2 = N; k2 < nKvPad; k2++) maskData[(size_t)r * nKvPad + k2] = 0xFC00;      // -inf in half precision
+            maskKey = N;
+        }
+        ggml_backend_tensor_set(faMask, maskData.data(), 0, maskData.size() * 2);
+    }
 
     if (ggml_backend_sched_graph_compute(cm.sched, g) != GGML_STATUS_SUCCESS) { err = "DiT compute failed"; ggml_free(c); return false; }
 

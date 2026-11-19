@@ -109,6 +109,7 @@ int runLtxTextTest(const std::vector<std::string>& a);
 int runLtxVaeTest(const std::vector<std::string>& a);
 int runLtxVaeBench(const std::vector<std::string>& a);
 int runLtxConvBench(const std::vector<std::string>& a);
+int runKreaOpBench(const std::vector<std::string>& a);
 int runLtxDitTest(const std::vector<std::string>& a);
 int runLtxUpscalerTest(const std::vector<std::string>& a);
 int runLtxGenTest(const std::vector<std::string>& a);
@@ -231,6 +232,7 @@ int runCli(const std::vector<std::string>& a) {
     if (a[0] == "ltx-gen") return runLtxGenTest(std::vector<std::string>(a.begin() + 1, a.end()));
     if (a[0] == "ltx-up") return runLtxUpscalerTest(std::vector<std::string>(a.begin() + 1, a.end()));
     if (a[0] == "ltx-dit") return runLtxDitTest(std::vector<std::string>(a.begin() + 1, a.end()));
+    if (a[0] == "krea-op-bench") return runKreaOpBench(std::vector<std::string>(a.begin() + 1, a.end()));
     if (a[0] == "ltx-conv-bench") return runLtxConvBench(std::vector<std::string>(a.begin() + 1, a.end()));
     if (a[0] == "ltx-vae-bench") return runLtxVaeBench(std::vector<std::string>(a.begin() + 1, a.end()));
     if (a[0] == "ltx-vae") return runLtxVaeTest(std::vector<std::string>(a.begin() + 1, a.end()));
