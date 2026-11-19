@@ -13,6 +13,11 @@
 #include "util/sys.h"
 
 namespace {
+// a NaN or infinity anywhere turns the picture black without any error: stop where it is born
+bool finiteAll(const std::vector<float>& v) {
+    for (size_t i = 0; i < v.size(); i++) if (!std::isfinite(v[i])) return false;
+    return true;
+}
 std::vector<float> swapAB(const std::vector<float>& a, int A, int B, size_t inner) {            // [A][B][inner] -> [B][A][inner]
     std::vector<float> o(a.size());
     for (int i = 0; i < A; i++) for (int j = 0; j < B; j++) memcpy(&o[((size_t)j * A + i) * inner], &a[((size_t)i * B + j) * inner], inner * 4);
@@ -45,6 +50,10 @@ bool eulerStage(LtxDit& dit, LtxDitInput base, std::vector<float>& vid, std::vec
         base.videoSigma.resize(F); for (int f = 0; f < F; f++) base.videoSigma[f] = mask[f] * s;
         if (step) step(i, steps, -1);
         if (!dit.forward(base, vo, ao, [&](int b) { if (step) step(i, steps, b); }, err)) return false;
+        if (!finiteAll(vo) || !finiteAll(ao)) {
+            err = "the transformer produced invalid numbers (step " + std::to_string(i + 1) + " of " + std::to_string(steps) + ", " + std::to_string(base.F * base.h * base.w) + " video tokens): the video is too large for this graphics backend; try a smaller size or another Backend";
+            return false;
+        }
         for (int c = 0; c < 128; c++) for (int f = 0; f < F; f++) for (int p = 0; p < hw; p++) {
             const size_t k = ((size_t)c * F + f) * hw + p;
             float den = xin[k] - vo[k] * s; den = den * mask[f] + vLI[k] * (1.f - mask[f]);
@@ -146,6 +155,10 @@ bool ltxGenerate(LtxModels& models, const LtxGenParams& p, LtxResult& out, const
     say(0.92f, "decoding the video");
     Vol lat; lat.T = F; lat.C = 128; lat.H = fh; lat.W = fw; lat.d = swapAB(vid, 128, F, (size_t)fh * fw);
     if (!vae.decode(lat, out.frames, [&](const std::string& s) { say(0.95f, "video decoder: " + s); }, err)) return false;
+    if (!finiteAll(out.frames.d)) { err = "the video decoder produced invalid numbers (the video is too large for this graphics backend; try a smaller size or another Backend)"; return false; }
+    {   float mx = -1e9f; for (float v : out.frames.d) mx = std::max(mx, v);                   // pixels are in [-1, 1]: a whole video at -1 is a failure, not a dark scene
+        if (mx < -0.97f) { err = "the video came out completely black (a numeric problem on this graphics backend, not a dark scene)"; return false; }
+    }
     out.audioLatent = aud; out.audioFrames = Ta;
     if (p.decodeAudio) {
         say(0.97f, "decoding the sound");
@@ -209,4 +222,5 @@ int runMp4FrameTest(const std::vector<std::string>& a) {
     printf("%dx%d, %.2f s, audio stream: %s\n", w, h, secs, aud ? "yes" : "no");
     return 0;
 }
+
 
