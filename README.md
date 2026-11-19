@@ -1,4 +1,4 @@
-﻿# Dopplers Bakery
+# Dopplers Bakery
 
 An offline studio for **chat, images, music, sound effects and speech** on your own Windows PC.
 A native C++ app (ggml / llama.cpp), no Python, no ComfyUI, no cloud. Talk to the assistant and it makes pictures, audio and a spoken reply; edit your own pictures; use the same chat from a browser.
@@ -8,6 +8,8 @@ A native C++ app (ggml / llama.cpp), no Python, no ComfyUI, no cloud. Talk to th
 ![Audio tab: player with position, Extend... next to the length trackbar, F2 / F3 / Shift+Del shortcuts](docs/screenshot-audio.png)
 
 ![Image tab with image-to-image, size sliders and the results list](docs/screenshot-image.png)
+
+![Video tab: Improve, Expand and Extend buttons, a finished clip in the results list](docs/screenshot-video.png)
 
 > ## ⚠️ Read this first: the app downloads gigabytes of data
 > The program itself is small (~70 MB), but it **does not contain any AI models**. To work it needs model files: about **36 GB** for chat, speech, images and audio,
