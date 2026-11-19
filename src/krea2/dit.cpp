@@ -47,6 +47,7 @@ int Krea2DiT::makeResident(size_t maxBytes) {
 }
 
 void Krea2DiT::unload() {
+    txCache_.clear();
     releaseResident();
     if (buf_) ggml_backend_buffer_free(buf_);
     if (ctx_) ggml_free(ctx_);
@@ -280,6 +281,44 @@ ggml_tensor* fusionBlock(ggml_context* c, const Krea2DiT::Blk& b, ggml_tensor* x
 }
 }  // namespace
 
+// The text half of the DiT for one prompt: [kDim, seq]. Cached by the content of the conditioning (a few entries: positive and negative prompt).
+bool Krea2DiT::textTokens(const std::vector<float>& ctx, int seq, const std::vector<float>*& out, std::string& err) {
+    uint64_t key = 1469598103934665603ULL ^ (uint64_t)seq;
+    for (size_t i = 0; i < ctx.size(); i += 1021) { uint32_t u; memcpy(&u, &ctx[i], 4); key = (key ^ u) * 1099511628211ULL; }
+    if (!ctx.empty()) { uint32_t u; memcpy(&u, &ctx.back(), 4); key = (key ^ u) * 1099511628211ULL; }
+    auto it = txCache_.find(key);
+    if (it != txCache_.end()) { out = &it->second; return true; }
+
+    const size_t nodes = 2048;
+    std::vector<uint8_t> meta(ggml_tensor_overhead() * nodes + ggml_graph_overhead_custom(nodes, false) + (1 << 20));
+    ggml_init_params ip = {meta.size(), meta.data(), true};
+    ggml_context* c = ggml_init(ip);
+    ggml_tensor* ctxIn = ggml_new_tensor_3d(c, GGML_TYPE_F32, kTxtDim, kTxtLayers, seq); ggml_set_input(ctxIn);
+    ggml_tensor* tx = ctxIn;
+    for (auto& b : layerwise_) tx = fusionBlock(c, b, tx);
+    tx = ggml_cont(c, ggml_permute(c, tx, 1, 0, 2, 3));                    // [12, 2560, seq]
+    tx = ggml_reshape_2d(c, ggml_mul_mat(c, projector, tx), kTxtDim, seq);
+    for (auto& b : refiner_) tx = fusionBlock(c, b, tx);
+    tx = ggml_mul(c, ggml_rms_norm(c, tx, 1e-5f), txtNorm);
+    tx = addBias(c, ggml_mul_mat(c, txt1W, tx), txt1B);
+    tx = addBias(c, ggml_mul_mat(c, txt3W, ggml_gelu(c, tx)), txt3B);
+    ggml_set_output(tx);
+    ggml_cgraph* g = ggml_new_graph_custom(c, nodes, false);
+    ggml_build_forward_expand(g, tx);
+    Compute& cm = Compute::get();
+    ggml_backend_sched_reset(cm.sched);
+    if (!ggml_backend_sched_alloc_graph(cm.sched, g)) { err = "cannot allocate the text graph"; ggml_free(c); return false; }
+    ggml_backend_tensor_set(ctxIn, ctx.data(), 0, ctx.size() * sizeof(float));
+    if (ggml_backend_sched_graph_compute(cm.sched, g) != GGML_STATUS_SUCCESS) { err = "DiT text compute failed"; ggml_free(c); return false; }
+    std::vector<float> v((size_t)kDim * seq);
+    ggml_backend_tensor_get(tx, v.data(), 0, v.size() * sizeof(float));
+    ggml_backend_sched_reset(cm.sched);
+    ggml_free(c);
+    if (txCache_.size() >= 4) txCache_.clear();
+    out = &(txCache_[key] = std::move(v));
+    return true;
+}
+
 bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sigma,
                        const std::vector<float>& ctx, int seq, std::vector<float>& out, std::string& err) {
     if (!loaded()) { err = "DiT not loaded"; return false; }
@@ -287,6 +326,10 @@ bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sig
     if (simulateFull && Compute::get().usingGpu()) { err = "cannot allocate DiT graph"; return false; }
     if (H % 2 || W % 2) { err = "latent size must be even"; return false; }
     const int hp = H / 2, wp = W / 2, nImg = hp * wp, N = seq + nImg;
+
+    static const bool statsOn0 = getenv("BAKERY_DIT_STATS") != nullptr;
+    const std::vector<float>* txCached = nullptr; ggml_tensor* txIn = nullptr;
+    if (!debug && !statsOn0 && !getenv("BAKERY_DIT_NOTXCACHE")) { if (!textTokens(ctx, seq, txCached, err)) return false; }
 
     const size_t nodes = mlpChunk > 0 ? 24576 : 6144;                     // chunked MLPs need more graph nodes
     std::vector<uint8_t> meta(ggml_tensor_overhead() * nodes + ggml_graph_overhead_custom(nodes, false) + (1 << 20));
@@ -297,13 +340,14 @@ bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sig
     static const bool statsOn = getenv("BAKERY_DIT_STATS") != nullptr;                // prints mean/std/NaN count of a few intermediate tensors
     auto tap = [&](const char* n, ggml_tensor* x) { if (debug || statsOn) { ggml_set_output(x); taps.push_back({n, x}); } };
     ggml_tensor* imgIn = ggml_new_tensor_2d(c, GGML_TYPE_F32, 64, nImg); ggml_set_input(imgIn);
-    ggml_tensor* ctxIn = ggml_new_tensor_3d(c, GGML_TYPE_F32, kTxtDim, kTxtLayers, seq); ggml_set_input(ctxIn);
+    ggml_tensor* ctxIn = nullptr;
+    if (!txCached) { ctxIn = ggml_new_tensor_3d(c, GGML_TYPE_F32, kTxtDim, kTxtLayers, seq); ggml_set_input(ctxIn); }
     ggml_tensor* tIn = ggml_new_tensor_1d(c, GGML_TYPE_F32, 256); ggml_set_input(tIn);
     ggml_tensor* cosIn = ggml_new_tensor_4d(c, GGML_TYPE_F32, 1, 64, 1, N); ggml_set_input(cosIn);
     ggml_tensor* sinIn = ggml_new_tensor_4d(c, GGML_TYPE_F32, 1, 64, 1, N); ggml_set_input(sinIn);
     // grouped-query attention kernel of ggml-cuda needs a mask and a key count that is a multiple of 256 (padded keys are masked out with -inf)
     static const bool wantMask = getenv("BAKERY_DIT_NOFAMASK") == nullptr;                     // on by default; the switch is for comparisons
-    const bool useMask = wantMask && Compute::get().description().find("CUDA") != std::string::npos;
+    const bool useMask = wantMask && !getenv("BAKERY_DIT_NOATTN") && Compute::get().description().find("CUDA") != std::string::npos;
     const int64_t nKvPad = (N + 255) / 256 * 256, nQPad = (N + 63) / 64 * 64;
     ggml_tensor* faMask = nullptr;
     if (useMask) { faMask = ggml_new_tensor_2d(c, GGML_TYPE_F16, nKvPad, nQPad); ggml_set_input(faMask); }
@@ -314,17 +358,21 @@ bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sig
     ggml_tensor* tvec = addBias(c, ggml_mul_mat(c, tpW, ggml_gelu(c, t)), tpB);
     tap("t", t); tap("tvec", tvec);
 
-    // text: 12-layer fusion -> refiner -> projection to model width
-    ggml_tensor* tx = ctxIn;
-    for (auto& b : layerwise_) tx = fusionBlock(c, b, tx);
-    tx = ggml_cont(c, ggml_permute(c, tx, 1, 0, 2, 3));                    // [12, 2560, seq]
-    tx = ggml_reshape_2d(c, ggml_mul_mat(c, projector, tx), kTxtDim, seq);
-    for (auto& b : refiner_) tx = fusionBlock(c, b, tx);
-    tap("fusion", tx);
-    tx = ggml_mul(c, ggml_rms_norm(c, tx, 1e-5f), txtNorm);
-    tx = addBias(c, ggml_mul_mat(c, txt1W, tx), txt1B);
-    tx = addBias(c, ggml_mul_mat(c, txt3W, ggml_gelu(c, tx)), txt3B);
-    tap("txt", tx);
+    // text: 12-layer fusion -> refiner -> projection to model width (done once per prompt, see textTokens; the debug / stats modes keep it in this graph)
+    ggml_tensor* tx;
+    if (txCached) { tx = ggml_new_tensor_2d(c, GGML_TYPE_F32, kDim, seq); ggml_set_input(tx); txIn = tx; }
+    else {
+        tx = ctxIn;
+        for (auto& b : layerwise_) tx = fusionBlock(c, b, tx);
+        tx = ggml_cont(c, ggml_permute(c, tx, 1, 0, 2, 3));                    // [12, 2560, seq]
+        tx = ggml_reshape_2d(c, ggml_mul_mat(c, projector, tx), kTxtDim, seq);
+        for (auto& b : refiner_) tx = fusionBlock(c, b, tx);
+        tap("fusion", tx);
+        tx = ggml_mul(c, ggml_rms_norm(c, tx, 1e-5f), txtNorm);
+        tx = addBias(c, ggml_mul_mat(c, txt1W, tx), txt1B);
+        tx = addBias(c, ggml_mul_mat(c, txt3W, ggml_gelu(c, tx)), txt3B);
+        tap("txt", tx);
+    }
 
     ggml_tensor* img = addBias(c, ggml_mul_mat(c, firstW, imgIn), firstB);
     tap("img0", img);
@@ -369,7 +417,8 @@ bool Krea2DiT::forward(const std::vector<float>& latent, int H, int W, float sig
     for (int r = 0; r < hp; r++) for (int cc = 0; cc < wp; cc++) for (int ch = 0; ch < 16; ch++) for (int ph = 0; ph < 2; ph++) for (int pw = 0; pw < 2; pw++)
         tok[((size_t)(r * wp + cc)) * 64 + ch * 4 + ph * 2 + pw] = latent[((size_t)ch * H + (r * 2 + ph)) * W + (cc * 2 + pw)];
     ggml_backend_tensor_set(imgIn, tok.data(), 0, tok.size() * sizeof(float));
-    ggml_backend_tensor_set(ctxIn, ctx.data(), 0, ctx.size() * sizeof(float));
+    if (ctxIn) ggml_backend_tensor_set(ctxIn, ctx.data(), 0, ctx.size() * sizeof(float));
+    if (txIn) ggml_backend_tensor_set(txIn, txCached->data(), 0, txCached->size() * sizeof(float));
     std::vector<float> te(256);
     for (int k = 0; k < 128; k++) {
         double a = 1000.0 * sigma * std::exp(-std::log(10000.0) * k / 128.0);

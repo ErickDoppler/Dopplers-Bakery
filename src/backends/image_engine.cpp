@@ -175,6 +175,7 @@ bool runImage(const Job& job, JobCtl& ctl, std::string& err) {
     ctl.progress(0.14f, "encoding prompt");
     std::vector<float> ctxPos, ctxNeg; int seqPos = 0, seqNeg = 0;
     if (!g.te.encode(g.tok.encode(krea2Template(prompt)), ctxPos, seqPos, err)) return false;
+    logLine("image: " + std::to_string(seqPos) + " text tokens, " + std::to_string((latH / 2) * (latW / 2)) + " image tokens");
     if (useCfg && !g.te.encode(g.tok.encode(krea2Template(neg)), ctxNeg, seqNeg, err)) return false;
 
     // ---- sampling in latent space (DiT needs even latent sizes; extra border is cropped afterwards)

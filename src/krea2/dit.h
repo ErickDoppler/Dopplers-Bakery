@@ -1,6 +1,8 @@
 // Krea2 single-stream MMDiT on ggml (CPU). Weights: scaled FP8 -> Q8_0 at load.
 #pragma once
+#include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 #include <utility>
@@ -49,4 +51,7 @@ private:
     ggml_tensor *firstW, *firstB, *tm0W, *tm0B, *tm2W, *tm2B, *tpW, *tpB;
     ggml_tensor *projector, *txtNorm, *txt1W, *txt1B, *txt3W, *txt3B;
     ggml_tensor *lastNorm, *lastLin, *lastW, *lastB;
+    // The text half of the model (12-layer fusion, refiner, projection) depends only on the prompt, not on the picture or the step: it is computed once per prompt and reused.
+    std::map<uint64_t, std::vector<float>> txCache_;
+    bool textTokens(const std::vector<float>& ctx, int seq, const std::vector<float>*& out, std::string& err);
 };
