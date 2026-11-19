@@ -157,7 +157,8 @@ bool ltxGenerate(LtxModels& models, const LtxGenParams& p, LtxResult& out, const
     dit.releaseResident();
     say(0.92f, "decoding the video");
     Vol lat; lat.T = F; lat.C = 128; lat.H = fh; lat.W = fw; lat.d = swapAB(vid, 128, F, (size_t)fh * fw);
-    if (!vae.decode(lat, out.frames, [&](const std::string& s) { say(0.95f, "video decoder: " + s); }, err)) return false;
+    int decStep = 0;
+    if (!vae.decode(lat, out.frames, [&](const std::string& s) { say(0.92f + 0.005f * (float)(++decStep), "video decoder: " + s); }, err)) return false;
     if (!finiteAll(out.frames.d)) { err = "the video decoder produced invalid numbers (the video is too large for this graphics backend; try a smaller size or another Backend)"; return false; }
     {   float mx = -1e9f; for (float v : out.frames.d) mx = std::max(mx, v);                   // pixels are in [-1, 1]: a whole video at -1 is a failure, not a dark scene
         if (mx < -0.97f) { err = "the video came out completely black (a numeric problem on this graphics backend, not a dark scene)"; return false; }
@@ -228,6 +229,7 @@ int runMp4FrameTest(const std::vector<std::string>& a) {
     printf("%dx%d, %.2f s, audio stream: %s\n", w, h, secs, aud ? "yes" : "no");
     return 0;
 }
+
 
 
 

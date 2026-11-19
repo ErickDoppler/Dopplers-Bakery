@@ -154,8 +154,12 @@ inline TT conv3(ggml_context* c, const ConvW& cw, TT x, int padF, int padB, bool
         TT part = nullptr;
         for (int dt = 0; dt < 3; dt++) {
             TT s = ggml_cont(c, ggml_view_4d(c, xp, W, H, C, n, xp->nb[1], xp->nb[2], xp->nb[3], (size_t)(t0 + dt) * xp->nb[3]));
-            TT y = ggml_conv_2d(c, cw.w[dt], s, 1, 1, 1, 1, 1, 1);
-            if (convF32()) { TT mn = y; for (int k = 0; k < 8 && mn && mn->op != GGML_OP_MUL_MAT; k++) mn = mn->src[0]; if (mn && mn->op == GGML_OP_MUL_MAT) ggml_mul_mat_set_prec(mn, GGML_PREC_F32); }
+            // the implicit-GEMM kernel (no im2col buffer, about 15 % faster on CUDA) converts its input to half precision, which overflows in the
+            // wide-activation encoder / upscaler: those (convF32 scope) keep the im2col path. LTX_NO_DIRECT turns it off (test hook).
+            static const bool allowDirect = getenv("LTX_NO_DIRECT") == nullptr;
+            const bool direct = allowDirect && !convF32();
+            TT y = direct ? ggml_conv_2d_direct(c, cw.w[dt], s, 1, 1, 1, 1, 1, 1) : ggml_conv_2d(c, cw.w[dt], s, 1, 1, 1, 1, 1, 1);
+            if (!direct && convF32()) { TT mn = y; for (int k = 0; k < 8 && mn && mn->op != GGML_OP_MUL_MAT; k++) mn = mn->src[0]; if (mn && mn->op == GGML_OP_MUL_MAT) ggml_mul_mat_set_prec(mn, GGML_PREC_F32); }
             part = part ? ggml_add(c, part, y) : y;
         }
         acc = acc ? ggml_concat(c, acc, part, 3) : part;

@@ -1,7 +1,9 @@
 ﻿#include "ltx/ltx_vae.h"
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <thread>
 #include "ltx/ltx_ggml.h"
 #include "util/sys.h"
 
@@ -17,50 +19,98 @@ TT resBlock(ggml_context* c, const Res& r, TT x, int padF, int padB) {
     return ggml_add(c, h, x);
 }
 
-// ---- host-side rearranges
+// ---- host-side rearranges (the volumes are gigabytes at full size: every one runs on all cores, one (frame, channel) row of output per task)
+template <class F> void parallelRows(size_t n, F fn) {
+    const size_t nt = std::max<size_t>(1, std::min<size_t>(n, std::thread::hardware_concurrency()));
+    std::vector<std::thread> th;
+    for (size_t t = 0; t < nt; t++) th.emplace_back([&, t] { for (size_t i = t; i < n; i += nt) fn(i); });
+    for (auto& x : th) x.join();
+}
 Vol depthToSpace(const Vol& y, int p1, int p2, int p3, bool dropFirst) {
-    const int C = y.C / (p1 * p2 * p3), T = y.T * p1;
-    Vol o; o.alloc(T - (dropFirst ? 1 : 0), C, y.H * p2, y.W * p3);
-    for (int t = 0; t < o.T; t++) {
-        const int st = (t + (dropFirst ? 1 : 0)) / p1, i1 = (t + (dropFirst ? 1 : 0)) % p1;
-        for (int c = 0; c < C; c++) for (int h = 0; h < o.H; h++) for (int w = 0; w < o.W; w++)
-            o.at(t, c, h, w) = y.at(st, ((c * p1 + i1) * p2 + h % p2) * p3 + w % p3, h / p2, w / p3);
-    }
+    const int C = y.C / (p1 * p2 * p3), T = y.T * p1, drop = dropFirst ? 1 : 0;
+    Vol o; o.T = T - drop; o.C = C; o.H = y.H * p2; o.W = y.W * p3; o.d.resize((size_t)o.T * o.C * o.H * o.W);
+    parallelRows((size_t)o.T * o.C, [&](size_t row) {
+        const int t = (int)(row / C), c = (int)(row % C), st = (t + drop) / p1, i1 = (t + drop) % p1;
+        float* dst = &o.d[row * (size_t)o.H * o.W];
+        for (int h = 0; h < o.H; h++) {
+            const int base = ((c * p1 + i1) * p2 + h % p2) * p3;
+            for (int w = 0; w < o.W; w++) dst[(size_t)h * o.W + w] = y.d[(((size_t)st * y.C + base + w % p3) * y.H + h / p2) * y.W + w / p3];
+        }
+    });
     return o;
 }
 Vol spaceToDepth(const Vol& x, int p1, int p2, int p3) {        // "b c (d p1) (h p2) (w p3) -> b (c p1 p2 p3) d h w"
-    Vol o; o.alloc(x.T / p1, x.C * p1 * p2 * p3, x.H / p2, x.W / p3);
-    for (int t = 0; t < x.T; t++) for (int c = 0; c < x.C; c++) for (int h = 0; h < x.H; h++) for (int w = 0; w < x.W; w++)
-        o.at(t / p1, ((c * p1 + t % p1) * p2 + h % p2) * p3 + w % p3, h / p2, w / p3) = x.at(t, c, h, w);
+    Vol o; o.T = x.T / p1; o.C = x.C * p1 * p2 * p3; o.H = x.H / p2; o.W = x.W / p3; o.d.resize((size_t)o.T * o.C * o.H * o.W);
+    parallelRows((size_t)o.T * o.C, [&](size_t row) {
+        const int t = (int)(row / o.C), ch = (int)(row % o.C), i3 = ch % p3, i2 = (ch / p3) % p2, i1 = (ch / (p3 * p2)) % p1, c = ch / (p3 * p2 * p1);
+        float* dst = &o.d[row * (size_t)o.H * o.W];
+        for (int h = 0; h < o.H; h++) for (int w = 0; w < o.W; w++) dst[(size_t)h * o.W + w] = x.d[(((size_t)(t * p1 + i1) * x.C + c) * x.H + h * p2 + i2) * x.W + w * p3 + i3];
+    });
     return o;
 }
 Vol unpatchify(const Vol& y, int q) {                           // "b (c r q) f h w -> b c f (h q) (w r)"
-    Vol o; o.alloc(y.T, y.C / (q * q), y.H * q, y.W * q);
-    for (int t = 0; t < o.T; t++) for (int c = 0; c < o.C; c++) for (int h = 0; h < o.H; h++) for (int w = 0; w < o.W; w++)
-        o.at(t, c, h, w) = y.at(t, (c * q + w % q) * q + h % q, h / q, w / q);
+    Vol o; o.T = y.T; o.C = y.C / (q * q); o.H = y.H * q; o.W = y.W * q; o.d.resize((size_t)o.T * o.C * o.H * o.W);
+    parallelRows((size_t)o.T * o.C, [&](size_t row) {
+        const int t = (int)(row / o.C), c = (int)(row % o.C);
+        float* dst = &o.d[row * (size_t)o.H * o.W];
+        for (int h = 0; h < o.H; h++) for (int w = 0; w < o.W; w++) dst[(size_t)h * o.W + w] = y.d[(((size_t)t * y.C + (c * q + w % q) * q + h % q) * y.H + h / q) * y.W + w / q];
+    });
     return o;
 }
 Vol patchify(const Vol& x, int q) {                             // "b c (h q) (w r) -> b (c r q) h w"
-    Vol o; o.alloc(x.T, x.C * q * q, x.H / q, x.W / q);
-    for (int t = 0; t < x.T; t++) for (int c = 0; c < x.C; c++) for (int h = 0; h < x.H; h++) for (int w = 0; w < x.W; w++)
-        o.at(t, (c * q + w % q) * q + h % q, h / q, w / q) = x.at(t, c, h, w);
+    Vol o; o.T = x.T; o.C = x.C * q * q; o.H = x.H / q; o.W = x.W / q; o.d.resize((size_t)o.T * o.C * o.H * o.W);
+    parallelRows((size_t)o.T * o.C, [&](size_t row) {
+        const int t = (int)(row / o.C), ch = (int)(row % o.C), qi = ch % q, ri = (ch / q) % q, c = ch / (q * q);
+        float* dst = &o.d[row * (size_t)o.H * o.W];
+        for (int h = 0; h < o.H; h++) for (int w = 0; w < o.W; w++) dst[(size_t)h * o.W + w] = x.d[(((size_t)t * x.C + c) * x.H + h * q + qi) * x.W + w * q + ri];
+    });
     return o;
 }
 
-// run `build` (x: input volume as a [W,H,C,T] tensor) as one graph and return the result volume
-template <class F> bool runVol(const Vol& in, Vol& out, int outC, int outT, F build, std::string& err) {
+struct VolTimes { double build = 0, alloc = 0, set = 0, compute = 0, get = 0; };
+inline VolTimes& volTimes() { static VolTimes t; return t; }
+inline double nowSec() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+template <class F> bool runVolOnce(const Vol& in, Vol& out, F build, std::string& err) {
+    VolTimes& vt = volTimes(); double t0 = nowSec();
     Graph G(16384); ggml_context* c = G.c;
     TT x = ggml_new_tensor_4d(c, GGML_TYPE_F32, in.W, in.H, in.C, in.T); ggml_set_input(x);
     TT y = build(c, x);
     ggml_set_output(y); ggml_build_forward_expand(G.g, y);
+    double t1 = nowSec(); vt.build += t1 - t0;
     if (!runGraph(G, err)) return false;
+    double t2 = nowSec(); vt.alloc += t2 - t1;
     ggml_backend_tensor_set(x, in.d.data(), 0, in.d.size() * 4);
+    double t3 = nowSec(); vt.set += t3 - t2;
     if (!computeGraph(G, err)) return false;
+    double t4 = nowSec(); vt.compute += t4 - t3;
     out.T = (int)y->ne[3]; out.C = (int)y->ne[2]; out.H = (int)y->ne[1]; out.W = (int)y->ne[0];
-    (void)outC; (void)outT;
     out.d.resize((size_t)out.T * out.C * out.H * out.W);
     ggml_backend_tensor_get(y, out.d.data(), 0, out.d.size() * 4);
     ggml_backend_sched_reset(Compute::get().sched);
+    vt.get += nowSec() - t4;
+    return true;
+}// Same, but long videos go through the graph in time chunks. Every convolution looks one frame ahead and behind, so a chunk is given `halo` extra frames on
+// each side (the number of convolutions in `build`) and only its exact middle is kept: the result equals one big graph, while the tensors stay small enough
+// for the video memory (a whole 10 s video at full resolution is 8 GB per tensor and silently spills to the CPU). outC: channels of the biggest tensor if not the input's.
+template <class F> bool runVol(const Vol& in, Vol& out, int halo, int outC, F build, std::string& err) {
+    const size_t freeMB = Compute::get().gpuFreeMB();
+    const size_t budget = std::min<size_t>(1u << 30, std::max<size_t>(256u << 20, (freeMB << 20) / 10));          // bytes of one tensor
+    const size_t frameBytes = (size_t)std::max(in.C, outC) * in.H * in.W * 4;
+    const int maxFrames = (int)std::max<size_t>((size_t)(2 * halo + 2), budget / std::max<size_t>(frameBytes, 1));
+    if (halo <= 0 || in.T <= maxFrames) return runVolOnce(in, out, build, err);
+    const int core = maxFrames - 2 * halo;
+    const size_t inFrame = (size_t)in.C * in.H * in.W;
+    for (int t0 = 0; t0 < in.T; t0 += core) {
+        const int a = std::max(0, t0 - halo), b = std::min(in.T, t0 + core + halo);
+        Vol sub; sub.T = b - a; sub.C = in.C; sub.H = in.H; sub.W = in.W;
+        sub.d.assign(in.d.begin() + (size_t)a * inFrame, in.d.begin() + (size_t)b * inFrame);
+        Vol ys; if (!runVolOnce(sub, ys, build, err)) return false;
+        if (ys.T != sub.T) { err = "internal error: a time-chunked graph changed the number of frames"; return false; }
+        if (t0 == 0) { out.T = in.T; out.C = ys.C; out.H = ys.H; out.W = ys.W; out.d.assign((size_t)out.T * out.C * out.H * out.W, 0.f); }
+        const size_t outFrame = (size_t)out.C * out.H * out.W;
+        const int keep0 = t0 - a, keepN = std::min(core, in.T - t0);
+        memcpy(out.d.data() + (size_t)t0 * outFrame, ys.d.data() + (size_t)keep0 * outFrame, (size_t)keepN * outFrame * 4);
+    }
     return true;
 }
 int countRes(const LtxWeights& ck, const std::string& p) { int n = 0; while (ck.has(p + "res_blocks." + std::to_string(n) + ".conv1.conv.weight")) n++; return n; }
@@ -73,10 +123,13 @@ bool LtxVae::decode(const Vol& latent, Vol& frames, const std::function<void(con
     Vol x = latent;
     for (int t = 0; t < x.T; t++) for (int c = 0; c < x.C; c++) for (int h = 0; h < x.H; h++) for (int w = 0; w < x.W; w++) x.at(t, c, h, w) = x.at(t, c, h, w) * stdv[c] + mean[c];
     const int F = 1, B = 1;                                           // non-causal decoder: replicate one frame at each end
-    auto say = [&](const std::string& s) { if (progress) progress(s); };
+    auto say = [&](const std::string& s) {
+        if (getenv("LTX_DEBUG")) { VolTimes& t = volTimes(); fprintf(stderr, "      [previous block: build %.1f s, graph alloc %.1f s, upload %.1f s, compute %.1f s, download %.1f s]\n", t.build, t.alloc, t.set, t.compute, t.get); t = VolTimes(); }
+        if (progress) progress(s);
+    };
     {   say("conv_in");
         WeightSet W; ConvW cw; if (!loadConv(W, *ckpt, "vae.decoder.conv_in.conv.", cw, err) || !W.upload(err)) return false;
-        Vol y; if (!runVol(x, y, 0, 0, [&](ggml_context* c, TT in) { return conv3(c, cw, in, F, B); }, err)) return false; x = std::move(y);
+        Vol y; if (!runVol(x, y, 1, 0, [&](ggml_context* c, TT in) { return conv3(c, cw, in, F, B); }, err)) return false; x = std::move(y);
     }
     struct Up { int p1, p2, p3; };
     const Up ups[9] = {{0,0,0}, {2,2,2}, {0,0,0}, {2,2,2}, {0,0,0}, {2,1,1}, {0,0,0}, {1,2,2}, {0,0,0}};
@@ -88,16 +141,16 @@ bool LtxVae::decode(const Vol& latent, Vol& frames, const std::function<void(con
             std::vector<Res> rs((size_t)countRes(*ckpt, p));
             for (size_t k = 0; k < rs.size(); k++) if (!loadRes(W, *ckpt, p + "res_blocks." + std::to_string(k) + ".", rs[k], err)) return false;
             if (!W.upload(err)) return false;
-            Vol y; if (!runVol(x, y, 0, 0, [&](ggml_context* c, TT in) { TT h = in; for (auto& r : rs) h = resBlock(c, r, h, F, B); return h; }, err)) return false; x = std::move(y);
+            Vol y; if (!runVol(x, y, 2 * (int)rs.size(), 0, [&](ggml_context* c, TT in) { TT h = in; for (auto& r : rs) h = resBlock(c, r, h, F, B); return h; }, err)) return false; x = std::move(y);
         } else {
             ConvW cw; if (!loadConv(W, *ckpt, p + "conv.conv.", cw, err) || !W.upload(err)) return false;
-            Vol y; if (!runVol(x, y, 0, 0, [&](ggml_context* c, TT in) { return conv3(c, cw, in, F, B); }, err)) return false;
+            Vol y; if (!runVol(x, y, 1, cw.oc, [&](ggml_context* c, TT in) { return conv3(c, cw, in, F, B); }, err)) return false;
             x = depthToSpace(y, ups[i].p1, ups[i].p2, ups[i].p3, ups[i].p1 == 2);
         }
     }
     say("conv_out");
     {   WeightSet W; ConvW cw; if (!loadConv(W, *ckpt, "vae.decoder.conv_out.conv.", cw, err) || !W.upload(err)) return false;
-        Vol y; if (!runVol(x, y, 0, 0, [&](ggml_context* c, TT in) { return conv3(c, cw, ggml_silu(c, pixelNorm(c, in)), F, B); }, err)) return false;
+        Vol y; if (!runVol(x, y, 1, 0, [&](ggml_context* c, TT in) { return conv3(c, cw, ggml_silu(c, pixelNorm(c, in)), F, B); }, err)) return false;
         frames = unpatchify(y, 4);
     }
     return true;
@@ -185,5 +238,72 @@ int runLtxVaeTest(const std::vector<std::string>& a) {
     }
     return 0;
 }
+
+
+
+
+// `DopplersBakery ltx-vae-bench <ckpt> T h w`: decodes a random latent of that size and prints the time of every block (no reference needed)
+int runLtxVaeBench(const std::vector<std::string>& a) {
+    if (a.size() < 4) { fprintf(stderr, "usage: ltx-vae-bench <ltx checkpoint> T h w\n"); return 2; }
+    LtxWeights w; std::string err; if (!w.open(a[0], err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+    LtxVae vae; vae.ckpt = &w;
+    Vol lat; lat.alloc(atoi(a[1].c_str()), 128, atoi(a[2].c_str()), atoi(a[3].c_str()));
+    unsigned s = 12345u; for (auto& v : lat.d) { s = s * 1664525u + 1013904223u; v = ((float)(s >> 8) / 16777216.f - 0.5f) * 3.f; }
+    auto t0 = std::chrono::steady_clock::now(); double last = 0; Vol out;
+    if (!vae.decode(lat, out, [&](const std::string& m) { const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); fprintf(stderr, "  %7.1f s  (+%.1f)  %s\n", t, t - last, m.c_str()); last = t; }, err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+    printf("decoded %d frames %dx%d in %.1f s\n", out.T, out.W, out.H, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    return 0;
+}
+
+
+
+// `DopplersBakery ltx-conv-bench <ckpt> [frames]`: times one 128-channel 3D convolution of the last decoder stage (320 x 192 pixels) done three ways
+int runLtxConvBench(const std::vector<std::string>& a) {
+    if (a.size() < 1) { fprintf(stderr, "usage: ltx-conv-bench <ltx checkpoint> [frames]\n"); return 2; }
+    LtxWeights w; std::string err; if (!w.open(a[0], err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+    if (!Compute::get().init(0, err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+    const int n = a.size() > 1 ? atoi(a[1].c_str()) : 16, W = 320, H = 192, C = 128;
+    const std::string name = "vae.decoder.up_blocks.8.res_blocks.0.conv1.conv.";
+    std::vector<float> in((size_t)W * H * C * n); unsigned s = 7u; for (auto& v : in) { s = s * 1664525u + 1013904223u; v = ((float)(s >> 8) / 16777216.f - 0.5f); }
+    WeightSet ws; ConvW cw; if (!loadConv(ws, w, name, cw, err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+    // the same weights as one 3D kernel for ggml_conv_3d: file order [oc][ic][kd][kh][kw] is already ggml [kw, kh, kd, oc*ic]
+    std::vector<float> raw; w.loadF32(name + "weight", raw, err);
+    TT k3 = ggml_new_tensor_4d(ws.ctx, GGML_TYPE_F16, 3, 3, 3, (int64_t)C * C); ws.items.push_back({k3, raw, true});
+    if (!ws.upload(err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+    std::vector<float> outA, outB;
+    for (int variant = 0; variant < 4; variant++) {
+        double best = 1e9;
+        for (int rep = 0; rep < 3; rep++) {
+            Graph G(4096); ggml_context* c = G.c;
+            TT x = ggml_new_tensor_4d(c, GGML_TYPE_F32, W, H, C, n); ggml_set_input(x);
+            TT y;
+            if (variant == 0) y = conv3(c, cw, x, 1, 1);
+            else if (variant == 2) y = ggml_conv_2d(c, cw.w[0], x, 1, 1, 1, 1, 1, 1);                                  // one tap: im2col + matrix product
+            else if (variant == 3) y = ggml_im2col(c, cw.w[0], x, 1, 1, 1, 1, 1, 1, true, GGML_TYPE_F16);                // only the im2col of that tap
+            else {
+                TT xt = ggml_cont(c, ggml_permute(c, x, 0, 1, 3, 2));                                        // [W,H,T,C]
+                TT first = ggml_view_4d(c, xt, W, H, 1, C, xt->nb[1], xt->nb[2], xt->nb[3], 0), last = ggml_view_4d(c, xt, W, H, 1, C, xt->nb[1], xt->nb[2], xt->nb[3], (size_t)(n - 1) * xt->nb[2]);
+                TT xp = ggml_concat(c, ggml_concat(c, first, xt, 2), last, 2);
+                TT r = ggml_conv_3d(c, k3, xp, C, 1, 1, 1, 1, 1, 0, 1, 1, 1);                                // [W,H,T,OC]
+                y = ggml_add(c, ggml_cont(c, ggml_permute(c, r, 0, 1, 3, 2)), ggml_reshape_4d(c, cw.b, 1, 1, C, 1));
+            }
+            ggml_set_output(y); ggml_build_forward_expand(G.g, y);
+            if (!runGraph(G, err)) { fprintf(stderr, "variant %d: %s\n", variant, err.c_str()); break; }
+            ggml_backend_tensor_set(x, in.data(), 0, in.size() * 4);
+            auto t0 = std::chrono::steady_clock::now();
+            if (!computeGraph(G, err)) { fprintf(stderr, "%s\n", err.c_str()); break; }
+            std::vector<float> o((size_t)ggml_nbytes(y) / 4 + 1); ggml_backend_tensor_get(y, o.data(), 0, ggml_nbytes(y));       // (the im2col variant is F16)
+            best = std::min(best, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+            (variant == 0 ? outA : outB) = o;
+            ggml_backend_sched_reset(Compute::get().sched);
+        }
+        const double tflop = 2.0 * (variant >= 2 ? 9 : 27) * C * C * (double)W * H * n / 1e12;
+        printf("%-26s %7.3f s   %.2f TFLOPS\n", variant == 0 ? "3 taps (current)" : variant == 1 ? "ggml_conv_3d" : variant == 2 ? "one tap conv_2d" : "one tap im2col only", best, tflop / best);
+    }
+    if (!outA.empty() && outA.size() == outB.size()) { double dot = 0, na = 0, nb = 0; for (size_t i = 0; i < outA.size(); i++) { dot += (double)outA[i] * outB[i]; na += (double)outA[i] * outA[i]; nb += (double)outB[i] * outB[i]; } printf("agreement (cosine): %.6f\n", dot / std::sqrt(na * nb)); }
+    return 0;
+}
+
+
 
 
