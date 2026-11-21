@@ -707,7 +707,14 @@ LRESULT CALLBACK pageProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
         break;
     case WM_NOTIFY:
-        if (((NMHDR*)lp)->idFrom == IDC_OUTLIST && ((NMHDR*)lp)->code == NM_DBLCLK) { onOutputAction(*p, IDC_PREVIEW); return 0; }
+        if (((NMHDR*)lp)->idFrom == IDC_OUTLIST && ((NMHDR*)lp)->code == NM_DBLCLK) {
+            // open the row that was double-clicked (the hit item of the notification), not whichever row the selection happens to be on
+            LVHITTESTINFO ht = {}; GetCursorPos(&ht.pt); ScreenToClient(p->list, &ht.pt);
+            int row = ListView_SubItemHitTest(p->list, &ht);
+            if (row < 0) row = ((NMITEMACTIVATE*)lp)->iItem;
+            if (row >= 0 && row < (int)p->outs.size()) selectOut(*p, row);
+            onOutputAction(*p, IDC_PREVIEW); return 0;
+        }
         if (((NMHDR*)lp)->idFrom == IDC_OUTLIST && ((NMHDR*)lp)->code == LVN_COLUMNCLICK) {      // click a header: sort by it, click again to reverse
             const int col = ((NMLISTVIEW*)lp)->iSubItem;
             if (col == p->sortCol) p->sortAsc = !p->sortAsc; else { p->sortCol = col; p->sortAsc = col == 1; }      // names A-Z first, dates / sizes / jobs newest or largest first
